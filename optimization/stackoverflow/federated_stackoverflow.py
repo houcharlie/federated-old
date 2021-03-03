@@ -35,7 +35,8 @@ def configure_training(
     embedding_size: int = 96,
     latent_size: int = 670,
     num_layers: int = 1,
-    shared_embedding: bool = False) -> training_specs.RunnerSpec:
+    shared_embedding: bool = False, 
+    cache_dir: str = '~') -> training_specs.RunnerSpec:
   """Configures training for Stack Overflow next-word prediction.
 
   This method will load and pre-process datasets and construct a model used for
@@ -94,7 +95,7 @@ def configure_training(
         keras_metrics.NumTokensCounter(masked_tokens=[pad_token])
     ]
 
-  train_clientdata, _, _ = tff.simulation.datasets.stackoverflow.load_data()
+  train_clientdata, _, _ = tff.simulation.datasets.stackoverflow.load_data(cache_dir=cache_dir)
 
   # TODO(b/161914546): consider moving evaluation to use
   # `tff.learning.build_federated_evaluation` to get metrics over client
@@ -104,7 +105,7 @@ def configure_training(
       vocab_size=vocab_size,
       max_sequence_length=sequence_length,
       num_validation_examples=num_validation_examples,
-      num_oov_buckets=num_oov_buckets)
+      num_oov_buckets=num_oov_buckets, cache_dir=cache_dir)
 
   train_dataset_preprocess_comp = stackoverflow_word_prediction.create_preprocess_fn(
       vocab=stackoverflow_word_prediction.create_vocab(vocab_size),

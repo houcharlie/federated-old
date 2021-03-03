@@ -33,7 +33,8 @@ def run_centralized(optimizer: tf.keras.optimizers.Optimizer,
                     vocab_tokens_size: Optional[int] = 10000,
                     vocab_tags_size: Optional[int] = 500,
                     num_validation_examples: Optional[int] = 10000,
-                    max_batches: Optional[int] = None):
+                    max_batches: Optional[int] = None,
+                    cache_dir: Optional[str] = None):
   """Trains an RNN on the Stack Overflow next word prediction task.
 
   Args:
@@ -65,7 +66,8 @@ def run_centralized(optimizer: tf.keras.optimizers.Optimizer,
       train_batch_size=batch_size,
       word_vocab_size=vocab_tokens_size,
       tag_vocab_size=vocab_tags_size,
-      num_validation_examples=num_validation_examples)
+      num_validation_examples=num_validation_examples,
+      cache_dir=cache_dir)
 
   if max_batches and max_batches >= 1:
     train_dataset = train_dataset.take(max_batches)

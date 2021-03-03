@@ -30,7 +30,8 @@ NUM_CLASSES = 100
 def configure_training(
     task_spec: training_specs.TaskSpec,
     crop_size: int = 24,
-    distort_train_images: bool = True) -> training_specs.RunnerSpec:
+    distort_train_images: bool = True,
+    cache_dir: str = '~') -> training_specs.RunnerSpec:
   """Configures training for the CIFAR-100 classification task.
 
   This method will load and pre-process datasets and construct a model used for
@@ -51,9 +52,9 @@ def configure_training(
   """
   crop_shape = (crop_size, crop_size, 3)
 
-  cifar_train, _ = tff.simulation.datasets.cifar100.load_data()
+  cifar_train, _ = tff.simulation.datasets.cifar100.load_data(cache_dir=cache_dir)
   _, cifar_test = cifar100_dataset.get_centralized_datasets(
-      train_batch_size=task_spec.client_batch_size, crop_shape=crop_shape)
+      train_batch_size=task_spec.client_batch_size, crop_shape=crop_shape, cache_dir=cache_dir)
 
   train_preprocess_fn = cifar100_dataset.create_preprocess_fn(
       num_epochs=task_spec.client_epochs_per_round,

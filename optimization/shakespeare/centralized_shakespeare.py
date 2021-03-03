@@ -35,7 +35,8 @@ def run_centralized(optimizer: tf.keras.optimizers.Optimizer,
                     lr_decay: Optional[float] = None,
                     hparams_dict: Optional[Mapping[str, Any]] = None,
                     sequence_length: Optional[int] = 80,
-                    max_batches: Optional[int] = None):
+                    max_batches: Optional[int] = None,
+                    cache_dir: Optional[str] = None):
   """Trains a two-layer RNN on Shakespeare next-character-prediction.
 
   Args:
@@ -60,7 +61,7 @@ def run_centralized(optimizer: tf.keras.optimizers.Optimizer,
   """
 
   shakespeare_train, shakespeare_test = shakespeare_dataset.get_centralized_datasets(
-      train_batch_size=batch_size, sequence_length=sequence_length)
+      train_batch_size=batch_size, sequence_length=sequence_length, cache_dir=cache_dir)
 
   if max_batches and max_batches >= 1:
     shakespeare_train = shakespeare_train.take(max_batches)

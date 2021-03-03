@@ -36,7 +36,8 @@ def run_centralized(optimizer: tf.keras.optimizers.Optimizer,
                     lr_decay: Optional[float] = None,
                     hparams_dict: Optional[Mapping[str, Any]] = None,
                     crop_size: Optional[int] = 24,
-                    max_batches: Optional[int] = None):
+                    max_batches: Optional[int] = None,
+                    cache_dir: Optional[str] = '~'):
   """Trains a ResNet-18 on CIFAR-100 using a given optimizer.
 
   Args:
@@ -62,7 +63,7 @@ def run_centralized(optimizer: tf.keras.optimizers.Optimizer,
   crop_shape = (crop_size, crop_size, NUM_CHANNELS)
 
   cifar_train, cifar_test = cifar100_dataset.get_centralized_datasets(
-      train_batch_size=batch_size, crop_shape=crop_shape)
+      train_batch_size=batch_size, crop_shape=crop_shape, cache_dir=cache_dir)
 
   if max_batches and max_batches >= 1:
     cifar_train = cifar_train.take(max_batches)

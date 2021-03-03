@@ -27,7 +27,8 @@ EMNIST_MODELS = ['cnn', '2nn']
 
 
 def configure_training(task_spec: training_specs.TaskSpec,
-                       model: str = 'cnn') -> training_specs.RunnerSpec:
+                       model: str = 'cnn',
+                      cache_dir: str = '~') -> training_specs.RunnerSpec:
   """Configures training for the EMNIST character recognition task.
 
   This method will load and pre-process datasets and construct a model used for
@@ -45,9 +46,9 @@ def configure_training(task_spec: training_specs.TaskSpec,
     federated task.
   """
   emnist_task = 'digit_recognition'
-  emnist_train, _ = tff.simulation.datasets.emnist.load_data(only_digits=False)
+  emnist_train, _ = tff.simulation.datasets.emnist.load_data(only_digits=False, cache_dir=cache_dir)
   _, emnist_test = emnist_dataset.get_centralized_datasets(
-      only_digits=False, emnist_task=emnist_task)
+      only_digits=False, emnist_task=emnist_task, cache_dir=cache_dir)
 
   train_preprocess_fn = emnist_dataset.create_preprocess_fn(
       num_epochs=task_spec.client_epochs_per_round,

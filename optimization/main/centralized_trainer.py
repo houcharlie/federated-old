@@ -47,6 +47,8 @@ with utils_impl.record_new_flags() as hparam_flags:
   flags.DEFINE_string(
       'experiment_name', None,
       'Name of the experiment. Part of the name of the output directory.')
+  flags.DEFINE_string(
+      'cache_dir', None, 'Where to send the datasets')
   flags.mark_flag_as_required('experiment_name')
   flags.DEFINE_string(
       'root_output_dir', '/tmp/centralized_opt',
@@ -126,32 +128,38 @@ def main(argv):
 
   if FLAGS.task == 'cifar100':
     centralized_cifar100.run_centralized(
-        **common_args, crop_size=FLAGS.cifar100_crop_size)
+        **common_args, crop_size=FLAGS.cifar100_crop_size,
+        cache_dir = FLAGS.cache_dir)
 
   elif FLAGS.task == 'emnist_cr':
     centralized_emnist.run_centralized(
-        **common_args, emnist_model=FLAGS.emnist_cr_model)
+        **common_args, emnist_model=FLAGS.emnist_cr_model,
+        cache_dir = FLAGS.cache_dir)
 
   elif FLAGS.task == 'emnist_ae':
-    centralized_emnist_ae.run_centralized(**common_args)
+    centralized_emnist_ae.run_centralized(**common_args,
+        cache_dir = FLAGS.cache_dir)
 
   elif FLAGS.task == 'shakespeare':
     centralized_shakespeare.run_centralized(
-        **common_args, sequence_length=FLAGS.shakespeare_sequence_length)
+        **common_args, sequence_length=FLAGS.shakespeare_sequence_length,
+        cache_dir = FLAGS.cache_dir)
 
   elif FLAGS.task == 'stackoverflow_nwp':
     so_nwp_flags = collections.OrderedDict()
     for flag_name in FLAGS:
       if flag_name.startswith('so_nwp_'):
         so_nwp_flags[flag_name[7:]] = FLAGS[flag_name].value
-    centralized_stackoverflow.run_centralized(**common_args, **so_nwp_flags)
+    centralized_stackoverflow.run_centralized(**common_args, **so_nwp_flags,
+        cache_dir = FLAGS.cache_dir)
 
   elif FLAGS.task == 'stackoverflow_lr':
     so_lr_flags = collections.OrderedDict()
     for flag_name in FLAGS:
       if flag_name.startswith('so_lr_'):
         so_lr_flags[flag_name[6:]] = FLAGS[flag_name].value
-    centralized_stackoverflow_lr.run_centralized(**common_args, **so_lr_flags)
+    centralized_stackoverflow_lr.run_centralized(**common_args, **so_lr_flags,
+        cache_dir = FLAGS.cache_dir)
 
   else:
     raise ValueError(

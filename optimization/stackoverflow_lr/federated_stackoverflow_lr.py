@@ -37,7 +37,8 @@ def configure_training(
     vocab_tokens_size: int = 10000,
     vocab_tags_size: int = 500,
     max_elements_per_user: int = 1000,
-    num_validation_examples: int = 10000) -> training_specs.RunnerSpec:
+    num_validation_examples: int = 10000, 
+    cache_dir: str = '~') -> training_specs.RunnerSpec:
   """Configures training for the Stack Overflow tag prediction task.
 
   This tag prediction is performed via multi-class one-versus-rest logistic
@@ -60,13 +61,14 @@ def configure_training(
     federated task.
   """
 
-  stackoverflow_train, _, _ = tff.simulation.datasets.stackoverflow.load_data()
+  stackoverflow_train, _, _ = tff.simulation.datasets.stackoverflow.load_data(cache_dir=cache_dir)
 
   _, stackoverflow_validation, stackoverflow_test = stackoverflow_tag_prediction.get_centralized_datasets(
       train_batch_size=task_spec.client_batch_size,
       word_vocab_size=vocab_tokens_size,
       tag_vocab_size=vocab_tags_size,
-      num_validation_examples=num_validation_examples)
+      num_validation_examples=num_validation_examples, 
+      cache_dir=cache_dir)
 
   word_vocab = stackoverflow_tag_prediction.create_word_vocab(vocab_tokens_size)
   tag_vocab = stackoverflow_tag_prediction.create_tag_vocab(vocab_tags_size)

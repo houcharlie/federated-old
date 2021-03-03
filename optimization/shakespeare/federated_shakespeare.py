@@ -48,7 +48,8 @@ def metrics_builder():
 
 
 def configure_training(task_spec: training_specs.TaskSpec,
-                       sequence_length: int = 80) -> training_specs.RunnerSpec:
+                       sequence_length: int = 80, 
+                      cache_dir: str = '~') -> training_specs.RunnerSpec:
   """Configures training for the Shakespeare next-character prediction task.
 
   This method will load and pre-process datasets and construct a model used for
@@ -65,9 +66,9 @@ def configure_training(task_spec: training_specs.TaskSpec,
     federated task.
   """
 
-  shakespeare_train, _ = tff.simulation.datasets.shakespeare.load_data()
+  shakespeare_train, _ = tff.simulation.datasets.shakespeare.load_data(cache_dir=cache_dir)
   _, shakespeare_test = shakespeare_dataset.get_centralized_datasets(
-      sequence_length=sequence_length)
+      sequence_length=sequence_length, cache_dir=cache_dir)
 
   train_preprocess_fn = shakespeare_dataset.create_preprocess_fn(
       num_epochs=task_spec.client_epochs_per_round,

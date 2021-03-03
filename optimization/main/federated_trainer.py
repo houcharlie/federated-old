@@ -67,6 +67,8 @@ with utils_impl.record_hparam_flags() as shared_flags:
   flags.DEFINE_string(
       'experiment_name', None, 'The name of this experiment. Will be append to '
       '--root_output_dir to separate experiment results.')
+  flags.DEFINE_string(
+      'cache_dir', None, 'Where to send the datasets')
   flags.mark_flag_as_required('experiment_name')
   flags.DEFINE_string('root_output_dir', '/tmp/fed_opt/',
                       'Root directory for writing experiment output.')
@@ -213,15 +215,19 @@ def main(argv):
     runner_spec = federated_cifar100.configure_training(
         task_spec,
         crop_size=FLAGS.cifar100_crop_size,
-        distort_train_images=FLAGS.cifar100_distort_train_images)
+        distort_train_images=FLAGS.cifar100_distort_train_images,
+        cache_dir = FLAGS.cache_dir)
   elif FLAGS.task == 'emnist_cr':
     runner_spec = federated_emnist.configure_training(
-        task_spec, model=FLAGS.emnist_cr_model)
+        task_spec, model=FLAGS.emnist_cr_model,
+        cache_dir = FLAGS.cache_dir)
   elif FLAGS.task == 'emnist_ae':
-    runner_spec = federated_emnist_ae.configure_training(task_spec)
+    runner_spec = federated_emnist_ae.configure_training(task_spec,
+        cache_dir = FLAGS.cache_dir)
   elif FLAGS.task == 'shakespeare':
     runner_spec = federated_shakespeare.configure_training(
-        task_spec, sequence_length=FLAGS.shakespeare_sequence_length)
+        task_spec, sequence_length=FLAGS.shakespeare_sequence_length,
+        cache_dir = FLAGS.cache_dir)
   elif FLAGS.task == 'stackoverflow_nwp':
     runner_spec = federated_stackoverflow.configure_training(
         task_spec,
@@ -229,14 +235,16 @@ def main(argv):
         num_oov_buckets=FLAGS.so_nwp_num_oov_buckets,
         sequence_length=FLAGS.so_nwp_sequence_length,
         max_elements_per_user=FLAGS.so_nwp_max_elements_per_user,
-        num_validation_examples=FLAGS.so_nwp_num_validation_examples)
+        num_validation_examples=FLAGS.so_nwp_num_validation_examples,
+        cache_dir = FLAGS.cache_dir)
   elif FLAGS.task == 'stackoverflow_lr':
     runner_spec = federated_stackoverflow_lr.configure_training(
         task_spec,
         vocab_tokens_size=FLAGS.so_lr_vocab_tokens_size,
         vocab_tags_size=FLAGS.so_lr_vocab_tags_size,
         max_elements_per_user=FLAGS.so_lr_max_elements_per_user,
-        num_validation_examples=FLAGS.so_lr_num_validation_examples)
+        num_validation_examples=FLAGS.so_lr_num_validation_examples,
+        cache_dir = FLAGS.cache_dir)
   else:
     raise ValueError(
         '--task flag {} is not supported, must be one of {}.'.format(

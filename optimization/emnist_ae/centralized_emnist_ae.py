@@ -30,7 +30,8 @@ def run_centralized(optimizer: tf.keras.optimizers.Optimizer,
                     decay_epochs: Optional[int] = None,
                     lr_decay: Optional[float] = None,
                     hparams_dict: Optional[Mapping[str, Any]] = None,
-                    max_batches: Optional[int] = None):
+                    max_batches: Optional[int] = None,
+                    cache_dir: Optional[str] = None):
   """Trains a bottleneck autoencoder on EMNIST using a given optimizer.
 
   Args:
@@ -53,7 +54,7 @@ def run_centralized(optimizer: tf.keras.optimizers.Optimizer,
       datasets are used.
   """
   train_dataset, eval_dataset = emnist_dataset.get_centralized_datasets(
-      train_batch_size=batch_size, only_digits=False, emnist_task='autoencoder')
+      train_batch_size=batch_size, only_digits=False, emnist_task='autoencoder', cache_dir=cache_dir)
 
   if max_batches and max_batches >= 1:
     train_dataset = train_dataset.take(max_batches)

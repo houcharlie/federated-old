@@ -25,7 +25,8 @@ from utils.models import emnist_ae_models
 
 
 def configure_training(
-    task_spec: training_specs.TaskSpec) -> training_specs.RunnerSpec:
+    task_spec: training_specs.TaskSpec, 
+    cache_dir: str = '~') -> training_specs.RunnerSpec:
   """Configures training for the EMNIST autoencoder task.
 
   This method will load and pre-process datasets and construct a model used for
@@ -41,9 +42,9 @@ def configure_training(
   """
 
   emnist_task = 'autoencoder'
-  emnist_train, _ = tff.simulation.datasets.emnist.load_data(only_digits=False)
+  emnist_train, _ = tff.simulation.datasets.emnist.load_data(only_digits=False, cache_dir=cache_dir)
   _, emnist_test = emnist_dataset.get_centralized_datasets(
-      only_digits=False, emnist_task=emnist_task)
+      only_digits=False, emnist_task=emnist_task, cache_dir=cache_dir)
 
   train_preprocess_fn = emnist_dataset.create_preprocess_fn(
       num_epochs=task_spec.client_epochs_per_round,

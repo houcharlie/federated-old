@@ -33,7 +33,8 @@ def run_centralized(optimizer: tf.keras.optimizers.Optimizer,
                     lr_decay: Optional[float] = None,
                     hparams_dict: Optional[Mapping[str, Any]] = None,
                     emnist_model: Optional[str] = 'cnn',
-                    max_batches: Optional[int] = None):
+                    max_batches: Optional[int] = None,
+                    cache_dir: Optional[str] = None):
   """Trains a model on EMNIST character recognition using a given optimizer.
 
   Args:
@@ -61,7 +62,8 @@ def run_centralized(optimizer: tf.keras.optimizers.Optimizer,
 
   train_dataset, eval_dataset = emnist_dataset.get_centralized_datasets(
       train_batch_size=batch_size,
-      only_digits=False)
+      only_digits=False,
+      cache_dir=cache_dir)
 
   if max_batches and max_batches >= 1:
     train_dataset = train_dataset.take(max_batches)
