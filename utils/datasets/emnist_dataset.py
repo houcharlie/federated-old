@@ -166,7 +166,8 @@ def get_centralized_datasets(
     train_shuffle_buffer_size: int = 10000,
     test_shuffle_buffer_size: int = 1,
     only_digits: bool = False,
-    emnist_task: str = 'digit_recognition'
+    emnist_task: str = 'digit_recognition',
+    cache_dir: Optional[str] = None
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
   """Loads and preprocesses centralized EMNIST training and testing sets.
 
@@ -198,7 +199,7 @@ def get_centralized_datasets(
     test_shuffle_buffer_size = 1
 
   emnist_train, emnist_test = tff.simulation.datasets.emnist.load_data(
-      only_digits=only_digits)
+      only_digits=only_digits, cache_dir=cache_dir)
 
   emnist_train = emnist_train.create_tf_dataset_from_all_clients()
   emnist_test = emnist_test.create_tf_dataset_from_all_clients()

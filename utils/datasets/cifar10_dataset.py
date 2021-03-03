@@ -30,7 +30,8 @@ NUM_CLIENTS = 10
 
 
 def load_cifar10_federated(
-    dirichlet_parameter: float = 1
+    dirichlet_parameter: float = 1,
+    cache_dir: Optional[str] = None
 ) -> Tuple[tff.simulation.ClientData, tff.simulation.ClientData]:
   """Construct a federated dataset from the centralized CIFAR-10.
 
@@ -56,6 +57,7 @@ def load_cifar10_federated(
           split='train',
           batch_size=-1,
           as_supervised=True,
+          data_dir= cache_dir
       ))
   test_images, test_labels = tfds.as_numpy(
       tfds.load(
@@ -63,6 +65,7 @@ def load_cifar10_federated(
           split='test',
           batch_size=-1,
           as_supervised=True,
+          data_dir= cache_dir
       ))
   train_clients = collections.OrderedDict()
   test_clients = collections.OrderedDict()
@@ -331,7 +334,8 @@ def get_centralized_datasets(
     test_batch_size: int = 100,
     train_shuffle_buffer_size: int = 10000,
     test_shuffle_buffer_size: int = 1,
-    crop_shape: Tuple[int, int, int] = CIFAR_SHAPE
+    crop_shape: Tuple[int, int, int] = CIFAR_SHAPE,
+    cache_dir: Optional[str] = None
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
   """Loads and preprocesses centralized CIFAR10 training and testing sets.
 
@@ -367,7 +371,7 @@ def get_centralized_datasets(
   if test_shuffle_buffer_size <= 1:
     test_shuffle_buffer_size = 1
 
-  cifar_train, cifar_test = load_cifar10_federated()
+  cifar_train, cifar_test = load_cifar10_federated(cache_dir = cache_dir)
   cifar_train = cifar_train.create_tf_dataset_from_all_clients()
   cifar_test = cifar_test.create_tf_dataset_from_all_clients()
 

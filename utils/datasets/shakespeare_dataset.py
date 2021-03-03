@@ -209,7 +209,8 @@ def get_centralized_datasets(
     test_batch_size: Optional[int] = 100,
     train_shuffle_buffer_size: Optional[int] = 1000,
     test_shuffle_buffer_size: Optional[int] = 1,
-    sequence_length: Optional[int] = SEQUENCE_LENGTH
+    sequence_length: Optional[int] = SEQUENCE_LENGTH,
+    cache_dir: Optional[str] = None
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
   """Loads and preprocesses centralized Shakespeare datasets.
 
@@ -235,7 +236,7 @@ def get_centralized_datasets(
     test_shuffle_buffer_size = 1
 
   shakespeare_train, shakespeare_test = (
-      tff.simulation.datasets.shakespeare.load_data())
+      tff.simulation.datasets.shakespeare.load_data(cache_dir=cache_dir))
 
   shakespeare_train = shakespeare_train.create_tf_dataset_from_all_clients()
   shakespeare_test = shakespeare_test.create_tf_dataset_from_all_clients()

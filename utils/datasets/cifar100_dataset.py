@@ -210,7 +210,8 @@ def get_centralized_datasets(
     test_batch_size: int = 100,
     train_shuffle_buffer_size: int = 10000,
     test_shuffle_buffer_size: int = 1,
-    crop_shape: Tuple[int, int, int] = CIFAR_SHAPE
+    crop_shape: Tuple[int, int, int] = CIFAR_SHAPE,
+    cache_dir: Optional[str] = None
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
   """Loads and preprocesses centralized CIFAR100 training and testing sets.
 
@@ -246,7 +247,7 @@ def get_centralized_datasets(
   if test_shuffle_buffer_size <= 1:
     test_shuffle_buffer_size = 1
 
-  cifar_train, cifar_test = tff.simulation.datasets.cifar100.load_data()
+  cifar_train, cifar_test = tff.simulation.datasets.cifar100.load_data(cache_dir=cache_dir)
   cifar_train = cifar_train.create_tf_dataset_from_all_clients()
   cifar_test = cifar_test.create_tf_dataset_from_all_clients()
 

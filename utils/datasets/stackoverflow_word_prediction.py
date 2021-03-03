@@ -287,7 +287,8 @@ def get_centralized_datasets(
     train_shuffle_buffer_size: int = 10000,
     validation_shuffle_buffer_size: int = 1,
     test_shuffle_buffer_size: int = 1,
-    num_oov_buckets: int = 1
+    num_oov_buckets: int = 1,
+    cache_dir: Optional[str] = None
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
   """Creates centralized datasets for Stack Overflow NWP.
 
@@ -346,7 +347,7 @@ def get_centralized_datasets(
       max_elements_per_client=-1,
       max_shuffle_buffer_size=test_shuffle_buffer_size)
 
-  raw_train, _, raw_test = tff.simulation.datasets.stackoverflow.load_data()
+  raw_train, _, raw_test = tff.simulation.datasets.stackoverflow.load_data(cache_dir=cache_dir)
   stackoverflow_train = raw_train.create_tf_dataset_from_all_clients()
   stackoverflow_train = train_preprocess_fn(stackoverflow_train)
 
