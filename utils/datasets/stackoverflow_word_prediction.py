@@ -14,7 +14,7 @@
 """Data loader for Stack Overflow next-word-prediction tasks."""
 
 import collections
-from typing import Callable, List, Tuple
+from typing import Callable, List, Tuple, Optional
 
 import attr
 import numpy as np

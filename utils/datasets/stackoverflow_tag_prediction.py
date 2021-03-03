@@ -14,7 +14,7 @@
 """Data loader for Stackoverflow tag prediction tasks."""
 
 import collections
-from typing import Callable, List, Tuple
+from typing import Callable, List, Tuple, Optional
 
 import numpy as np
 import tensorflow as tf

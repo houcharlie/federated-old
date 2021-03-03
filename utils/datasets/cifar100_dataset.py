@@ -14,7 +14,7 @@
 """Library for loading and preprocessing CIFAR-100 training and testing data."""
 
 import collections
-from typing import Callable, Sequence, Tuple, Union
+from typing import Callable, Sequence, Tuple, Union, Optional
 
 import tensorflow as tf
 import tensorflow_federated as tff

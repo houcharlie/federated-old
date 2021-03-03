@@ -14,7 +14,7 @@
 """Library for loading and preprocessing EMNIST training and testing data."""
 
 import collections
-from typing import Tuple
+from typing import Tuple, Optional
 
 import tensorflow as tf
 import tensorflow_federated as tff
