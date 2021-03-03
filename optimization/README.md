@@ -55,7 +55,8 @@ For example, from this directory one could run:
 bazel run main:federated_trainer -- --task=emnist_cr --total_rounds=100 \
 --client_optimizer=sgd --client_learning_rate=0.1 --client_batch_size=20 \
 --server_optimizer=sgd --server_learning_rate=1.0 --clients_per_round=10 \
---client_epochs_per_round=1 --experiment_name=emnist_fedavg_experiment
+--client_epochs_per_round=1 --experiment_name=emnist_fedavg_experiment \
+--cache_dir=/ocean/projects/iri180031p/houc/
 ```
 
 This will run 100 communication rounds of federated training, using SGD on both
