@@ -19,13 +19,13 @@ from absl.testing import parameterized
 import tensorflow as tf
 import tensorflow_federated as tff
 
-from optimization.cifar100 import federated_cifar100
-from optimization.emnist import federated_emnist
-from optimization.emnist_ae import federated_emnist_ae
-from optimization.shakespeare import federated_shakespeare
-from optimization.shared import training_specs
-from optimization.stackoverflow import federated_stackoverflow
-from optimization.stackoverflow_lr import federated_stackoverflow_lr
+from catalyst.cifar100 import federated_cifar100
+from catalyst.emnist import federated_emnist
+from catalyst.emnist_ae import federated_emnist_ae
+from catalyst.shakespeare import federated_shakespeare
+from catalyst.shared import training_specs
+from catalyst.stackoverflow import federated_stackoverflow
+from catalyst.stackoverflow_lr import federated_stackoverflow_lr
 from utils import training_loop
 
 

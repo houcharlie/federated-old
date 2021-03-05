@@ -24,13 +24,13 @@ import collections
 from absl import app
 from absl import flags
 
-from optimization.cifar100 import centralized_cifar100
-from optimization.emnist import centralized_emnist
-from optimization.emnist_ae import centralized_emnist_ae
-from optimization.shakespeare import centralized_shakespeare
-from optimization.shared import optimizer_utils
-from optimization.stackoverflow import centralized_stackoverflow
-from optimization.stackoverflow_lr import centralized_stackoverflow_lr
+from catalyst.cifar100 import centralized_cifar100
+from catalyst.emnist import centralized_emnist
+from catalyst.emnist_ae import centralized_emnist_ae
+from catalyst.shakespeare import centralized_shakespeare
+from catalyst.shared import optimizer_utils
+from catalyst.stackoverflow import centralized_stackoverflow
+from catalyst.stackoverflow_lr import centralized_stackoverflow_lr
 from utils import utils_impl
 
 _SUPPORTED_TASKS = [

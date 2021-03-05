@@ -17,7 +17,7 @@ from typing import Any, Mapping, Optional
 
 import tensorflow as tf
 
-from optimization.shared import keras_metrics
+from catalyst.shared import keras_metrics
 from utils import centralized_training_loop
 from utils.datasets import shakespeare_dataset
 from utils.models import shakespeare_models

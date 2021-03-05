@@ -20,7 +20,7 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_federated as tff
 
-from optimization.shared import fed_avg_schedule
+from catalyst.shared import fed_avg_schedule
 
 _Batch = collections.namedtuple('Batch', ['x', 'y'])
 

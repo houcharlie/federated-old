@@ -17,7 +17,7 @@ from typing import Any, Mapping, Optional
 
 import tensorflow as tf
 
-from optimization.shared import keras_metrics
+from catalyst.shared import keras_metrics
 from utils import centralized_training_loop
 from utils.datasets import stackoverflow_word_prediction
 from utils.models import stackoverflow_models

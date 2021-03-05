@@ -17,7 +17,7 @@ import collections
 import tensorflow as tf
 import tensorflow_federated as tff
 
-from optimization.shared import evaluation
+from catalyst.shared import evaluation
 
 
 def keras_model_fn():

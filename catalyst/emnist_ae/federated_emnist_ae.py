@@ -18,7 +18,7 @@ import functools
 import tensorflow as tf
 import tensorflow_federated as tff
 
-from optimization.shared import training_specs
+from catalyst.shared import training_specs
 from utils import training_utils
 from utils.datasets import emnist_dataset
 from utils.models import emnist_ae_models

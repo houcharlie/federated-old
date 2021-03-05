@@ -15,8 +15,8 @@
 
 Specifically, we create (according to flags) an iterative processes that allows
 for client and server learning rate schedules, as well as various client and
-server optimization methods. For more details on the learning rate scheduling
-and optimization methods, see `shared/optimizer_utils.py`. For details on the
+server catalyst methods. For more details on the learning rate scheduling
+and catalyst methods, see `shared/optimizer_utils.py`. For details on the
 iterative process, see `shared/fed_avg_schedule.py`.
 """
 
@@ -29,15 +29,15 @@ from absl import flags
 import tensorflow as tf
 import tensorflow_federated as tff
 
-from optimization.cifar100 import federated_cifar100
-from optimization.emnist import federated_emnist
-from optimization.emnist_ae import federated_emnist_ae
-from optimization.shakespeare import federated_shakespeare
-from optimization.shared import fed_avg_schedule
-from optimization.shared import optimizer_utils
-from optimization.shared import training_specs
-from optimization.stackoverflow import federated_stackoverflow
-from optimization.stackoverflow_lr import federated_stackoverflow_lr
+from catalyst.cifar100 import federated_cifar100
+from catalyst.emnist import federated_emnist
+from catalyst.emnist_ae import federated_emnist_ae
+from catalyst.shakespeare import federated_shakespeare
+from catalyst.shared import fed_avg_schedule
+from catalyst.shared import optimizer_utils
+from catalyst.shared import training_specs
+from catalyst.stackoverflow import federated_stackoverflow
+from catalyst.stackoverflow_lr import federated_stackoverflow_lr
 from utils import training_loop
 from utils import utils_impl
 

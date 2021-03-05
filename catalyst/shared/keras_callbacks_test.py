@@ -17,7 +17,7 @@ import os.path
 import pandas as pd
 import tensorflow as tf
 
-from optimization.shared import keras_callbacks
+from catalyst.shared import keras_callbacks
 
 
 class KerasCallbacksTest(tf.test.TestCase):

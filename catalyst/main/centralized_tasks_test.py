@@ -19,12 +19,12 @@ from absl.testing import parameterized
 import pandas as pd
 import tensorflow as tf
 
-from optimization.cifar100 import centralized_cifar100
-from optimization.emnist import centralized_emnist
-from optimization.emnist_ae import centralized_emnist_ae
-from optimization.shakespeare import centralized_shakespeare
-from optimization.stackoverflow import centralized_stackoverflow
-from optimization.stackoverflow_lr import centralized_stackoverflow_lr
+from catalyst.cifar100 import centralized_cifar100
+from catalyst.emnist import centralized_emnist
+from catalyst.emnist_ae import centralized_emnist_ae
+from catalyst.shakespeare import centralized_shakespeare
+from catalyst.stackoverflow import centralized_stackoverflow
+from catalyst.stackoverflow_lr import centralized_stackoverflow_lr
 
 
 class CentralizedTasksTest(tf.test.TestCase, parameterized.TestCase):
