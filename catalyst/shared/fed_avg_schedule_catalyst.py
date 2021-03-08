@@ -88,57 +88,57 @@ def _get_weights(model: tf.keras.Model) -> tff.learning.ModelWeights:
 def _forward_pass(model: tf.keras.Model, batch_input, loss_fns, loss_weights, 
   tau, model_delta, metrics, training = True) -> tff.learning.BatchOutput:
   if hasattr(batch_input, '_asdict'):
-      batch_input = batch_input._asdict()
-    if isinstance(batch_input, collections.abc.Mapping):
-      inputs = batch_input.get('x')
-    else:
-      inputs = batch_input[0]
-    if inputs is None:
-      raise KeyError('Received a batch_input that is missing required key `x`. '
-                     'Instead have keys {}'.format(list(batch_input.keys())))
-    predictions = model(inputs, training=training)
+    batch_input = batch_input._asdict()
   if isinstance(batch_input, collections.abc.Mapping):
-      y_true = batch_input.get('y')
-    else:
-      y_true = batch_input[1]
-    if y_true is not None:
-      if len(loss_fns) == 1:
-        loss_fn = loss_fns[0]
-        # Note: we add each of the per-layer regularization losses to the loss
-        # that we use to update trainable parameters, in addition to the
-        # user-provided loss function. Keras does the same in the
-        # `tf.keras.Model` training step. This is expected to have no effect if
-        # no per-layer losses are added to the model.
-        batch_loss = tf.add_n([tf.zeros(())] + keras_model.losses)
-        for i in range(len(model_delta)):
-          batch_loss += tau*tf.nn.l2+loss(model_delta[i])
-        
-        batch_loss = tf.add_n([loss_fn(y_true=y_true, y_pred=predictions)] +
-                              keras_model.losses)
-
-      else:
-        # Note: we add each of the per-layer regularization losses to the losses
-        # that we use to update trainable parameters, in addition to the
-        # user-provided loss functions. Keras does the same in the
-        # `tf.keras.Model` training step. This is expected to have no effect if
-        # no per-layer losses are added to the model.
-        batch_loss = tf.add_n([tf.zeros(())] + keras_model.losses)
-        for i in range(len(loss_fns)):
-          loss_fn = loss_fns[i]
-          loss_wt = loss_weights[i]
-          batch_loss += loss_wt * loss_fn(
-              y_true=y_true[i], y_pred=predictions[i])
-        for i in range(len(model_delta)):
-          batch_loss += tau*tf.nn.l2+loss(model_delta[i])
+    inputs = batch_input.get('x')
+  else:
+    inputs = batch_input[0]
+  if inputs is None:
+    raise KeyError('Received a batch_input that is missing required key `x`. '
+                    'Instead have keys {}'.format(list(batch_input.keys())))
+  predictions = model(inputs, training=training)
+  if isinstance(batch_input, collections.abc.Mapping):
+    y_true = batch_input.get('y')
+  else:
+    y_true = batch_input[1]
+  if y_true is not None:
+    if len(loss_fns) == 1:
       loss_fn = loss_fns[0]
       # Note: we add each of the per-layer regularization losses to the loss
       # that we use to update trainable parameters, in addition to the
       # user-provided loss function. Keras does the same in the
       # `tf.keras.Model` training step. This is expected to have no effect if
       # no per-layer losses are added to the model.
+      batch_loss = tf.add_n([tf.zeros(())] + keras_model.losses)
+      for i in range(len(model_delta)):
+        batch_loss += tau*tf.nn.l2+loss(model_delta[i])
       
+      batch_loss = tf.add_n([loss_fn(y_true=y_true, y_pred=predictions)] +
+                            keras_model.losses)
+
     else:
-      batch_loss = None
+      # Note: we add each of the per-layer regularization losses to the losses
+      # that we use to update trainable parameters, in addition to the
+      # user-provided loss functions. Keras does the same in the
+      # `tf.keras.Model` training step. This is expected to have no effect if
+      # no per-layer losses are added to the model.
+      batch_loss = tf.add_n([tf.zeros(())] + keras_model.losses)
+      for i in range(len(loss_fns)):
+        loss_fn = loss_fns[i]
+        loss_wt = loss_weights[i]
+        batch_loss += loss_wt * loss_fn(
+            y_true=y_true[i], y_pred=predictions[i])
+      for i in range(len(model_delta)):
+        batch_loss += tau*tf.nn.l2+loss(model_delta[i])
+    loss_fn = loss_fns[0]
+      # Note: we add each of the per-layer regularization losses to the loss
+      # that we use to update trainable parameters, in addition to the
+      # user-provided loss function. Keras does the same in the
+      # `tf.keras.Model` training step. This is expected to have no effect if
+      # no per-layer losses are added to the model.
+      
+  else:
+    batch_loss = None
   for metric in metrics:
     metric.update_state(y_true = y_true, y_pred = predictions)
   return tff.learning.BatchOutput(
