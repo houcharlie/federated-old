@@ -54,6 +54,23 @@ py_test(
 )
 
 py_library(
+    name = "fed_avg_schedule_catalyst",
+    srcs = ["fed_avg_schedule_catalyst.py"],
+    srcs_version = "PY3",
+    deps = ["//utils:tensor_utils"],
+)
+
+py_test(
+    name = "fed_avg_schedule_catalyst_test",
+    size = "large",
+    srcs = ["fed_avg_schedule_catalyst_test.py"],
+    python_version = "PY3",
+    shard_count = 2,
+    srcs_version = "PY3",
+    deps = [":fed_avg_schedule_catalyst"],
+)
+
+py_library(
     name = "keras_metrics",
     srcs = ["keras_metrics.py"],
     srcs_version = "PY3",
