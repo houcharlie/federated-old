@@ -24,7 +24,6 @@ from catalyst.shared import fed_avg_schedule_catalyst
 
 _Batch = collections.namedtuple('Batch', ['x', 'y'])
 
-
 def _batch_fn(has_nan=False):
   batch = _Batch(
       x=np.ones([1, 784], dtype=np.float32), y=np.ones([1, 1], dtype=np.int64))
@@ -42,10 +41,7 @@ def _create_input_spec():
 def _uncompiled_model_builder():
   keras_model = tff.simulation.models.mnist.create_keras_model(
       compile_model=False)
-  return tff.learning.from_keras_model(
-      keras_model=keras_model,
-      input_spec=_create_input_spec(),
-      loss=tf.keras.losses.SparseCategoricalCrossentropy())
+  return keras_model
 
 
 class ModelDeltaProcessTest(tf.test.TestCase):
@@ -65,6 +61,11 @@ class ModelDeltaProcessTest(tf.test.TestCase):
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
         _uncompiled_model_builder,
+        [tf.keras.losses.SparseCategoricalCrossentropy()],
+        [1.0],
+        [],
+        0.,
+        _create_input_spec(),
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD)
 
@@ -79,6 +80,11 @@ class ModelDeltaProcessTest(tf.test.TestCase):
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
         _uncompiled_model_builder,
+        [tf.keras.losses.SparseCategoricalCrossentropy()],
+        [1.0],
+        [],
+        0.,
+        _create_input_spec(),
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD,
         client_weight_fn=client_weight_fn)
@@ -92,7 +98,8 @@ class ModelDeltaProcessTest(tf.test.TestCase):
     client_optimizer = tf.keras.optimizers.SGD(0.1)
     client_update = fed_avg_schedule.create_client_update_fn()
     outputs = client_update(model, federated_data,
-                            fed_avg_schedule._get_weights(model),
+                            [tf.keras.losses.SparseCategoricalCrossentropy()],
+                            [1.0],[],0.,fed_avg_schedule._get_weights(model),
                             client_optimizer)
     self.assertAllEqual(self.evaluate(outputs.client_weight), 1)
     self.assertAllEqual(
@@ -104,7 +111,8 @@ class ModelDeltaProcessTest(tf.test.TestCase):
     client_optimizer = tf.keras.optimizers.SGD(0.1)
     client_update = fed_avg_schedule.create_client_update_fn()
     outputs = client_update(model, federated_data,
-                            fed_avg_schedule._get_weights(model),
+                            [tf.keras.losses.SparseCategoricalCrossentropy()],
+                            [1.0],[],0.,fed_avg_schedule._get_weights(model),
                             client_optimizer)
     self.assertAllEqual(self.evaluate(outputs.client_weight), 0)
 
@@ -113,6 +121,11 @@ class ModelDeltaProcessTest(tf.test.TestCase):
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
         _uncompiled_model_builder,
+        [tf.keras.losses.SparseCategoricalCrossentropy()],
+        [1.0],
+        [],
+        0.,
+        _create_input_spec(),
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD)
 
@@ -128,6 +141,11 @@ class ModelDeltaProcessTest(tf.test.TestCase):
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
         _uncompiled_model_builder,
+        [tf.keras.losses.SparseCategoricalCrossentropy()],
+        [1.0],
+        [],
+        0.,
+        _create_input_spec(),
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD,
         client_weight_fn=client_weight_fn)
@@ -147,6 +165,11 @@ class ModelDeltaProcessTest(tf.test.TestCase):
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
         _uncompiled_model_builder,
+        [tf.keras.losses.SparseCategoricalCrossentropy()],
+        [1.0],
+        [],
+        0.,
+        _create_input_spec(),
         client_optimizer_fn=tf.keras.optimizers.SGD,
         client_lr=lr_schedule,
         server_optimizer_fn=tf.keras.optimizers.SGD)
@@ -165,6 +188,11 @@ class ModelDeltaProcessTest(tf.test.TestCase):
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
         _uncompiled_model_builder,
+        [tf.keras.losses.SparseCategoricalCrossentropy()],
+        [1.0],
+        [],
+        0.,
+        _create_input_spec(),
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD,
         server_lr=lr_schedule)
@@ -179,6 +207,11 @@ class ModelDeltaProcessTest(tf.test.TestCase):
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
         _uncompiled_model_builder,
+        [tf.keras.losses.SparseCategoricalCrossentropy()],
+        [1.0],
+        [],
+        0.,
+        _create_input_spec(),
         client_optimizer_fn=tf.keras.optimizers.SGD,
         client_lr=lambda x: 0.1 / (x + 1)**2,
         server_optimizer_fn=tf.keras.optimizers.SGD,
@@ -207,6 +240,11 @@ class ModelDeltaProcessTest(tf.test.TestCase):
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
         _uncompiled_model_builder,
+        [tf.keras.losses.SparseCategoricalCrossentropy()],
+        [1.0],
+        [],
+        0.,
+        _create_input_spec(),
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD)
 
@@ -254,6 +292,11 @@ class ModelDeltaProcessTest(tf.test.TestCase):
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
         _uncompiled_model_builder,
+        [tf.keras.losses.SparseCategoricalCrossentropy()],
+        [1.0],
+        [],
+        0.,
+        _create_input_spec(),
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD)
 
@@ -271,6 +314,11 @@ class ModelDeltaProcessTest(tf.test.TestCase):
 
     iterative_process = fed_avg_schedule.build_fed_avg_process(
         _uncompiled_model_builder,
+        [tf.keras.losses.SparseCategoricalCrossentropy()],
+        [1.0],
+        [],
+        0.,
+        _create_input_spec(),
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD)
     state = iterative_process.initialize()
