@@ -25,7 +25,8 @@ Communication-Efficient Learning of Deep Networks from Decentralized Data
 """
 
 import collections
-from typing import Callable, Optional, Union, List
+from typing import Callable, Optional, Union
+
 import attr
 import tensorflow as tf
 import tensorflow_federated as tff
@@ -33,119 +34,25 @@ from utils import tensor_utils
 
 
 # Convenience type aliases.
-Loss = List[tf.keras.losses.Loss]
-ModelBuilder = Callable[[], tf.keras.Model]
+ModelBuilder = Callable[[], tff.learning.Model]
 OptimizerBuilder = Callable[[float], tf.keras.optimizers.Optimizer]
 ClientWeightFn = Callable[..., float]
 LRScheduleFn = Callable[[Union[int, tf.Tensor]], Union[tf.Tensor, float]]
 
-class _WeightedMeanLossMetric(tf.keras.metrics.Mean):
-  """A `tf.keras.metrics.Metric` wrapper for the loss function."""
 
-  def __init__(self, loss_fns, loss_weights, name='loss', dtype=tf.float32):
-    super().__init__(name, dtype)
-    self._loss_fns = loss_fns
-    self._loss_weights = loss_weights
-
-  def update_state(self, y_true, y_pred, sample_weight=None):
-    if isinstance(y_pred, list):
-      batch_size = tf.shape(y_pred[0])[0]
-    else:
-      batch_size = tf.shape(y_pred)[0]
-
-    if len(self._loss_fns) == 1:
-      batch_loss = self._loss_fns[0](y_true, y_pred)
-    else:
-      batch_loss = tf.zeros(())
-      for i in range(len(self._loss_fns)):
-        batch_loss += self._loss_weights[i] * self._loss_fns[i](y_true[i],
-                                                                y_pred[i])
-
-    return super().update_state(batch_loss, batch_size)
-def report_local_outputs(metrics):
-    """Reports the variables of the metrics tracked during local training.
-    Returns:
-      A `collections.OrderedDict` of metric name keys to lists of metric
-      variables.
-    """
-    outputs = collections.OrderedDict()
-    for metric in metrics:
-      outputs[metric.name] = [v.read_value() for v in metric.variables]
-    return outputs
-def _initialize_optimizer_vars(model: tf.keras.Model,
+def _initialize_optimizer_vars(model: tff.learning.Model,
                                optimizer: tf.keras.optimizers.Optimizer):
   """Ensures variables holding the state of `optimizer` are created."""
-  delta = tf.nest.map_structure(tf.zeros_like, model.trainable_variables)
+  delta = tf.nest.map_structure(tf.zeros_like, _get_weights(model).trainable)
+  model_weights = _get_weights(model)
   grads_and_vars = tf.nest.map_structure(lambda x, v: (x, v), delta,
-                                         model.trainable_weights)
+                                         model_weights.trainable)
   optimizer.apply_gradients(grads_and_vars, name='server_update')
   assert optimizer.variables()
 
 
-def _get_weights(model: tf.keras.Model) -> tff.learning.ModelWeights:
+def _get_weights(model: tff.learning.Model) -> tff.learning.ModelWeights:
   return tff.learning.ModelWeights.from_model(model)
-
-def _forward_pass(model: tf.keras.Model, batch_input, loss_fns, loss_weights, 
-  tau, model_delta, metrics, training = True) -> tff.learning.BatchOutput:
-  if hasattr(batch_input, '_asdict'):
-    batch_input = batch_input._asdict()
-  if isinstance(batch_input, collections.abc.Mapping):
-    inputs = batch_input.get('x')
-  else:
-    inputs = batch_input[0]
-  if inputs is None:
-    raise KeyError('Received a batch_input that is missing required key `x`. '
-                    'Instead have keys {}'.format(list(batch_input.keys())))
-  predictions = model(inputs, training=training)
-  if isinstance(batch_input, collections.abc.Mapping):
-    y_true = batch_input.get('y')
-  else:
-    y_true = batch_input[1]
-  if y_true is not None:
-    if len(loss_fns) == 1:
-      loss_fn = loss_fns[0]
-      # Note: we add each of the per-layer regularization losses to the loss
-      # that we use to update trainable parameters, in addition to the
-      # user-provided loss function. Keras does the same in the
-      # `tf.keras.Model` training step. This is expected to have no effect if
-      # no per-layer losses are added to the model.
-      batch_loss = tf.add_n([tf.zeros(())] + keras_model.losses)
-      for i in range(len(model_delta)):
-        batch_loss += tau*tf.nn.l2+loss(model_delta[i])
-      
-      batch_loss = tf.add_n([loss_fn(y_true=y_true, y_pred=predictions)] +
-                            keras_model.losses)
-
-    else:
-      # Note: we add each of the per-layer regularization losses to the losses
-      # that we use to update trainable parameters, in addition to the
-      # user-provided loss functions. Keras does the same in the
-      # `tf.keras.Model` training step. This is expected to have no effect if
-      # no per-layer losses are added to the model.
-      batch_loss = tf.add_n([tf.zeros(())] + keras_model.losses)
-      for i in range(len(loss_fns)):
-        loss_fn = loss_fns[i]
-        loss_wt = loss_weights[i]
-        batch_loss += loss_wt * loss_fn(
-            y_true=y_true[i], y_pred=predictions[i])
-      for i in range(len(model_delta)):
-        batch_loss += tau*tf.nn.l2+loss(model_delta[i])
-    loss_fn = loss_fns[0]
-      # Note: we add each of the per-layer regularization losses to the loss
-      # that we use to update trainable parameters, in addition to the
-      # user-provided loss function. Keras does the same in the
-      # `tf.keras.Model` training step. This is expected to have no effect if
-      # no per-layer losses are added to the model.
-      
-  else:
-    batch_loss = None
-  for metric in metrics:
-    metric.update_state(y_true = y_true, y_pred = predictions)
-  return tff.learning.BatchOutput(
-    loss=batch_loss,
-    predictions=predictions,
-    num_examples=tf.shape(tf.nest.flatten(inputs)[0])[0])
-  )
 
 
 @attr.s(eq=False, order=False, frozen=True)
@@ -236,9 +143,6 @@ def create_client_update_fn():
   @tf.function
   def client_update(model,
                     dataset,
-                    loss_fns,
-                    loss_weights,
-                    metrics,
                     tau,
                     initial_weights,
                     client_optimizer,
@@ -248,8 +152,6 @@ def create_client_update_fn():
     Args:
       model: A `tff.learning.Model`.
       dataset: A 'tf.data.Dataset'.
-      loss: A 'tf.keras.losses.Loss'.
-      tau: A float describing how much weight to put on proximal term.
       initial_weights: A `tff.learning.ModelWeights` from server.
       client_optimizer: A `tf.keras.optimizer.Optimizer` object.
       client_weight_fn: Optional function that takes the output of
@@ -263,25 +165,24 @@ def create_client_update_fn():
 
     model_weights = _get_weights(model)
     tff.utils.assign(model_weights, initial_weights)
-    metrics = metrics + [_WeightedMeanLossMetric(loss_fns, loss_weights)]
-    #initialize weights_delta for the proximal term.  Starts at 0.
-    weights_delta = tf.nest.map_structure(lambda a, b: a - b,
-                                          model_weights.trainable,
-                                          initial_weights.trainable)
+
     num_examples = tf.constant(0, dtype=tf.int32)
     for batch in dataset:
       with tf.GradientTape() as tape:
-        output = _forward_pass(model batch, loss_fns, loss_weights, 
-          tau, weights_delta, metrics, training = True)
-      grads = tape.gradient(output.loss, model_weights.trainable)
+        output = model.forward_pass(batch)
+        loss = output.loss
+        # add the l2 loss
+        for i in range(len(model_weights.trainable)):
+          loss += tau*tf.nn.l2_loss(model_weights.trainable[i] - initial_weights.trainable[i])
+      grads = tape.gradient(loss, model_weights.trainable)
       grads_and_vars = zip(grads, model_weights.trainable)
       client_optimizer.apply_gradients(grads_and_vars)
       num_examples += tf.shape(output.predictions)[0]
-      weights_delta = tf.nest.map_structure(lambda a, b: a - b,
+
+    aggregated_outputs = model.report_local_outputs()
+    weights_delta = tf.nest.map_structure(lambda a, b: a - b,
                                           model_weights.trainable,
                                           initial_weights.trainable)
-
-    aggregated_outputs = report_local_outputs(metrics)
     weights_delta, has_non_finite_weight = (
         tensor_utils.zero_all_if_any_non_finite(weights_delta))
 
@@ -309,7 +210,7 @@ def build_server_init_fn(
   `ServerState.round_num` is set to 0.0.
 
   Args:
-    model_fn: A no-arg function that returns a `tf.keras.Model`.
+    model_fn: A no-arg function that returns a `tff.learning.Model`.
     server_optimizer_fn: A no-arg function that returns a
       `tf.keras.optimizers.Optimizer`.
 
@@ -332,11 +233,7 @@ def build_server_init_fn(
 
 def build_fed_avg_process(
     model_fn: ModelBuilder,
-    loss_fns: Loss,
-    loss_weights: List[float],
-    metrics: List[tf.keras.metrics.Metric],
-    tau:float,
-    input_spec,
+    tau: float,
     client_optimizer_fn: OptimizerBuilder,
     client_lr: Union[float, LRScheduleFn] = 0.1,
     server_optimizer_fn: OptimizerBuilder = tf.keras.optimizers.SGD,
@@ -346,11 +243,7 @@ def build_fed_avg_process(
   """Builds the TFF computations for optimization using federated averaging.
 
   Args:
-    model_fn: A no-arg function that returns a `tf.keras.Model`.
-    loss_fns: A list of losses to be weighted
-    loss_weights: The weights for the above loss_fns
-    metrics: A list of tf.keras.metrics.Metric
-    tau: the constant given to the proximal term
+    model_fn: A no-arg function that returns a `tff.learning.Model`.
     client_optimizer_fn: A function that accepts a `learning_rate` keyword
       argument and returns a `tf.keras.optimizers.Optimizer` instance.
     client_lr: A scalar learning rate or a function that accepts a float
@@ -386,23 +279,16 @@ def build_fed_avg_process(
   model_weights_type = server_state_type.model
   round_num_type = server_state_type.round_num
 
-  tf_dataset_type = tff.SequenceType(input_spec)
-  model_input_type = tff.SequenceType(input_spec)
+  tf_dataset_type = tff.SequenceType(dummy_model.input_spec)
+  model_input_type = tff.SequenceType(dummy_model.input_spec)
 
   @tff.tf_computation(model_input_type, model_weights_type, round_num_type)
   def client_update_fn(tf_dataset, initial_model_weights, round_num):
     client_lr = client_lr_schedule(round_num)
     client_optimizer = client_optimizer_fn(client_lr)
     client_update = create_client_update_fn()
-    return client_update(model_fn(),
-                    tf_dataset,
-                    loss_fns,
-                    loss_weights,
-                    metrics,
-                    tau,
-                    initial_model_weights,
-                    client_optimizer,
-                    client_weight_fn)
+    return client_update(model_fn(), tf_dataset, tau, initial_model_weights,
+                         client_optimizer, client_weight_fn)
 
   @tff.tf_computation(server_state_type, model_weights_type.trainable)
   def server_update_fn(server_state, model_delta):

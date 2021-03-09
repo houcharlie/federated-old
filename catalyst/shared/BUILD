@@ -48,7 +48,7 @@ py_test(
     size = "large",
     srcs = ["fed_avg_schedule_test.py"],
     python_version = "PY3",
-    shard_count = 2,
+    shard_count = 1,
     srcs_version = "PY3",
     deps = [":fed_avg_schedule"],
 )
@@ -65,7 +65,7 @@ py_test(
     size = "large",
     srcs = ["fed_avg_schedule_catalyst_test.py"],
     python_version = "PY3",
-    shard_count = 2,
+    shard_count = 1,
     srcs_version = "PY3",
     deps = [":fed_avg_schedule_catalyst"],
 )

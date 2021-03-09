@@ -20,9 +20,10 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_federated as tff
 
-from catalyst.shared import fed_avg_schedule_catalyst
+from catalyst.shared import fed_avg_schedule_catalyst as fed_avg_schedule
 
 _Batch = collections.namedtuple('Batch', ['x', 'y'])
+TAU = 0.1
 
 def _batch_fn(has_nan=False):
   batch = _Batch(
@@ -41,11 +42,13 @@ def _create_input_spec():
 def _uncompiled_model_builder():
   keras_model = tff.simulation.models.mnist.create_keras_model(
       compile_model=False)
-  return keras_model
+  return tff.learning.from_keras_model(
+      keras_model=keras_model,
+      input_spec=_create_input_spec(),
+      loss=tf.keras.losses.SparseCategoricalCrossentropy())
 
 
 class ModelDeltaProcessTest(tf.test.TestCase):
-
   def _run_rounds(self, iterproc, federated_data, num_rounds):
     train_outputs = []
     initial_state = iterproc.initialize()
@@ -60,12 +63,7 @@ class ModelDeltaProcessTest(tf.test.TestCase):
     federated_data = [[_batch_fn()]]
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
-        _uncompiled_model_builder,
-        [tf.keras.losses.SparseCategoricalCrossentropy()],
-        [1.0],
-        [],
-        0.,
-        _create_input_spec(),
+        _uncompiled_model_builder, TAU,
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD)
 
@@ -79,12 +77,7 @@ class ModelDeltaProcessTest(tf.test.TestCase):
       return 1.0/(1.0 + local_outputs['loss'][-1])
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
-        _uncompiled_model_builder,
-        [tf.keras.losses.SparseCategoricalCrossentropy()],
-        [1.0],
-        [],
-        0.,
-        _create_input_spec(),
+        _uncompiled_model_builder, TAU,
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD,
         client_weight_fn=client_weight_fn)
@@ -97,9 +90,8 @@ class ModelDeltaProcessTest(tf.test.TestCase):
     model = _uncompiled_model_builder()
     client_optimizer = tf.keras.optimizers.SGD(0.1)
     client_update = fed_avg_schedule.create_client_update_fn()
-    outputs = client_update(model, federated_data,
-                            [tf.keras.losses.SparseCategoricalCrossentropy()],
-                            [1.0],[],0.,fed_avg_schedule._get_weights(model),
+    outputs = client_update(model, federated_data, TAU,
+                            fed_avg_schedule._get_weights(model),
                             client_optimizer)
     self.assertAllEqual(self.evaluate(outputs.client_weight), 1)
     self.assertAllEqual(
@@ -110,9 +102,8 @@ class ModelDeltaProcessTest(tf.test.TestCase):
     model = _uncompiled_model_builder()
     client_optimizer = tf.keras.optimizers.SGD(0.1)
     client_update = fed_avg_schedule.create_client_update_fn()
-    outputs = client_update(model, federated_data,
-                            [tf.keras.losses.SparseCategoricalCrossentropy()],
-                            [1.0],[],0.,fed_avg_schedule._get_weights(model),
+    outputs = client_update(model, federated_data, TAU,
+                            fed_avg_schedule._get_weights(model),
                             client_optimizer)
     self.assertAllEqual(self.evaluate(outputs.client_weight), 0)
 
@@ -120,12 +111,7 @@ class ModelDeltaProcessTest(tf.test.TestCase):
     federated_data = [[_batch_fn(has_nan=True)]]
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
-        _uncompiled_model_builder,
-        [tf.keras.losses.SparseCategoricalCrossentropy()],
-        [1.0],
-        [],
-        0.,
-        _create_input_spec(),
+        _uncompiled_model_builder,TAU,
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD)
 
@@ -140,12 +126,7 @@ class ModelDeltaProcessTest(tf.test.TestCase):
     client_weight_fn = lambda x: np.inf
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
-        _uncompiled_model_builder,
-        [tf.keras.losses.SparseCategoricalCrossentropy()],
-        [1.0],
-        [],
-        0.,
-        _create_input_spec(),
+        _uncompiled_model_builder,TAU,
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD,
         client_weight_fn=client_weight_fn)
@@ -164,12 +145,7 @@ class ModelDeltaProcessTest(tf.test.TestCase):
       return 0.1 if x < 1.5 else 0.0
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
-        _uncompiled_model_builder,
-        [tf.keras.losses.SparseCategoricalCrossentropy()],
-        [1.0],
-        [],
-        0.,
-        _create_input_spec(),
+        _uncompiled_model_builder, TAU,
         client_optimizer_fn=tf.keras.optimizers.SGD,
         client_lr=lr_schedule,
         server_optimizer_fn=tf.keras.optimizers.SGD)
@@ -187,12 +163,7 @@ class ModelDeltaProcessTest(tf.test.TestCase):
       return 1.0 if x < 1.5 else 0.0
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
-        _uncompiled_model_builder,
-        [tf.keras.losses.SparseCategoricalCrossentropy()],
-        [1.0],
-        [],
-        0.,
-        _create_input_spec(),
+        _uncompiled_model_builder,TAU,
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD,
         server_lr=lr_schedule)
@@ -206,12 +177,7 @@ class ModelDeltaProcessTest(tf.test.TestCase):
     federated_data = [[_batch_fn()]]
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
-        _uncompiled_model_builder,
-        [tf.keras.losses.SparseCategoricalCrossentropy()],
-        [1.0],
-        [],
-        0.,
-        _create_input_spec(),
+        _uncompiled_model_builder,TAU,
         client_optimizer_fn=tf.keras.optimizers.SGD,
         client_lr=lambda x: 0.1 / (x + 1)**2,
         server_optimizer_fn=tf.keras.optimizers.SGD,
@@ -239,12 +205,7 @@ class ModelDeltaProcessTest(tf.test.TestCase):
       return ds.map(to_batch).batch(2)
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
-        _uncompiled_model_builder,
-        [tf.keras.losses.SparseCategoricalCrossentropy()],
-        [1.0],
-        [],
-        0.,
-        _create_input_spec(),
+        _uncompiled_model_builder,TAU,
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD)
 
@@ -291,12 +252,7 @@ class ModelDeltaProcessTest(tf.test.TestCase):
       return ds.map(to_example).batch(1)
 
     iterproc = fed_avg_schedule.build_fed_avg_process(
-        _uncompiled_model_builder,
-        [tf.keras.losses.SparseCategoricalCrossentropy()],
-        [1.0],
-        [],
-        0.,
-        _create_input_spec(),
+        _uncompiled_model_builder,TAU,
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD)
 
@@ -313,12 +269,7 @@ class ModelDeltaProcessTest(tf.test.TestCase):
     federated_data = [[_batch_fn()]]
 
     iterative_process = fed_avg_schedule.build_fed_avg_process(
-        _uncompiled_model_builder,
-        [tf.keras.losses.SparseCategoricalCrossentropy()],
-        [1.0],
-        [],
-        0.,
-        _create_input_spec(),
+        _uncompiled_model_builder,TAU,
         client_optimizer_fn=tf.keras.optimizers.SGD,
         server_optimizer_fn=tf.keras.optimizers.SGD)
     state = iterative_process.initialize()
