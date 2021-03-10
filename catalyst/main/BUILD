@@ -53,6 +53,7 @@ py_binary(
         "//catalyst/emnist_ae:federated_emnist_ae",
         "//catalyst/shakespeare:federated_shakespeare",
         "//catalyst/shared:fed_avg_schedule",
+        "//catalyst/shared:fed_avg_schedule_catalyst",
         "//catalyst/shared:optimizer_utils",
         "//catalyst/shared:training_specs",
         "//catalyst/stackoverflow:federated_stackoverflow",

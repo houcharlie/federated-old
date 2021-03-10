@@ -16,3 +16,8 @@ venv/
 
 # PyCharm
 .idea*
+
+# ignore my shell scripts
+*/*.sh
+/catalyst/runfiles/*
+/catalyst/txtfiles/*

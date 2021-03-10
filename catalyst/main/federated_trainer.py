@@ -33,7 +33,7 @@ from catalyst.cifar100 import federated_cifar100
 from catalyst.emnist import federated_emnist
 from catalyst.emnist_ae import federated_emnist_ae
 from catalyst.shakespeare import federated_shakespeare
-from catalyst.shared import fed_avg_schedule
+from catalyst.shared import fed_avg_schedule_catalyst as fed_avg_schedule
 from catalyst.shared import optimizer_utils
 from catalyst.shared import training_specs
 from catalyst.stackoverflow import federated_stackoverflow
@@ -62,7 +62,7 @@ with utils_impl.record_hparam_flags() as shared_flags:
                        'How many clients to sample per round.')
   flags.DEFINE_integer('client_datasets_random_seed', 1,
                        'Random seed for client sampling.')
-
+  flags.DEFINE_float('tau', 1., 'The amount of catalyst regularization')
   # Training loop configuration
   flags.DEFINE_string(
       'experiment_name', None, 'The name of this experiment. Will be append to '
@@ -70,7 +70,7 @@ with utils_impl.record_hparam_flags() as shared_flags:
   flags.DEFINE_string(
       'cache_dir', None, 'Where to send the datasets')
   flags.mark_flag_as_required('experiment_name')
-  flags.DEFINE_string('root_output_dir', '/tmp/fed_opt/',
+  flags.DEFINE_string('root_output_dir', '/ocean/projects/iri180031p/houc/fed_opt',
                       'Root directory for writing experiment output.')
   flags.DEFINE_integer('total_rounds', 200, 'Number of total training rounds.')
   flags.DEFINE_integer(
@@ -198,6 +198,7 @@ def main(argv):
 
     return fed_avg_schedule.build_fed_avg_process(
         model_fn=model_fn,
+        tau = FLAGS.tau,
         client_optimizer_fn=client_optimizer_fn,
         client_lr=client_lr_schedule,
         server_optimizer_fn=server_optimizer_fn,
