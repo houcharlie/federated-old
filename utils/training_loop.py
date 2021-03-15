@@ -229,6 +229,7 @@ def run(iterative_process: tff.templates.IterativeProcess,
     train_metrics['training_secs'] = time.time() - training_start_time
     train_metrics['model_delta_l2_norm'] = _compute_numpy_l2_difference(
         current_model, prev_model)
+    train_metrics['client_drift'] = state.client_drift
     train_metrics.update(round_metrics)
 
     loop_time = time.time() - loop_start_time

@@ -68,12 +68,13 @@ class ServerState(object):
   model = attr.ib()
   optimizer_state = attr.ib()
   round_num = attr.ib()
+  client_drift = attr.ib()
   # This is a float to avoid type incompatibility when calculating learning rate
   # schedules.
 
 
 @tf.function
-def server_update(model, server_optimizer, server_state, weights_delta):
+def server_update(model, server_optimizer, server_state, weights_delta, client_drift):
   """Updates `server_state` based on `weights_delta`, increase the round number.
 
   Args:
@@ -108,7 +109,8 @@ def server_update(model, server_optimizer, server_state, weights_delta):
       server_state,
       model=model_weights,
       optimizer_state=server_optimizer.variables(),
-      round_num=server_state.round_num + 1.0)
+      round_num=server_state.round_num + 1.0,
+      client_drift=client_drift)
 
 
 @attr.s(eq=False, order=False, frozen=True)
@@ -126,6 +128,7 @@ class ClientOutput(object):
   -   `optimizer_output`: Additional metrics or other outputs defined by the
       optimizer.
   """
+  weights = attr.ib()
   weights_delta = attr.ib()
   client_weight = attr.ib()
   model_output = attr.ib()
@@ -194,6 +197,7 @@ def create_client_update_fn():
       client_weight = client_weight_fn(aggregated_outputs)
 
     return ClientOutput(
+        model_weights.trainable,
         weights_delta, client_weight, aggregated_outputs,
         collections.OrderedDict([('num_examples', num_examples)]))
 
@@ -226,7 +230,8 @@ def build_server_init_fn(
     return ServerState(
         model=_get_weights(model),
         optimizer_state=server_optimizer.variables(),
-        round_num=0.0)
+        round_num=0.0,
+        client_drift=tf.constant(0.))
 
   return server_init_tf
 
@@ -290,15 +295,15 @@ def build_fed_avg_process(
     return client_update(model_fn(), tf_dataset, tau, initial_model_weights,
                          client_optimizer, client_weight_fn)
 
-  @tff.tf_computation(server_state_type, model_weights_type.trainable)
-  def server_update_fn(server_state, model_delta):
+  @tff.tf_computation(server_state_type, model_weights_type.trainable, tf.float32)
+  def server_update_fn(server_state, model_delta, client_drift):
     model = model_fn()
     server_lr = server_lr_schedule(server_state.round_num)
     server_optimizer = server_optimizer_fn(server_lr)
     # We initialize the server optimizer variables to avoid creating them
     # within the scope of the tf.function server_update.
     _initialize_optimizer_vars(model, server_optimizer)
-    return server_update(model, server_optimizer, server_state, model_delta)
+    return server_update(model, server_optimizer, server_state, model_delta, client_drift)
 
   @tff.federated_computation(
       tff.type_at_server(server_state_type),
@@ -325,14 +330,34 @@ def build_fed_avg_process(
     model_delta = tff.federated_mean(
         client_outputs.weights_delta, weight=client_weight)
 
+    implicit_mean_broad = tff.federated_broadcast(tff.federated_mean(
+        client_outputs.weights, weight = client_weight
+    ))
+
+    @tff.tf_computation(model_weights_type.trainable, model_weights_type.trainable)
+    def individual_drift_fn(client_model, implicit_mean):
+      drifts = tf.nest.map_structure(lambda a, b: a - b,
+                                            client_model,
+                                            implicit_mean)
+      return drifts
+    drifts = tff.federated_map(individual_drift_fn, 
+      (client_outputs.weights, implicit_mean_broad))
+
+    @tff.tf_computation(model_weights_type.trainable)
+    def individual_drift_norm_fn(delta_from_mean):
+      drift_norm = tf.reduce_sum(tf.nest.flatten(
+        tf.nest.map_structure(lambda a: tf.nn.l2_loss(a), delta_from_mean)))
+      return drift_norm
+    drift_norms = tff.federated_map(individual_drift_norm_fn, drifts)
+    client_drift = tff.federated_mean(drift_norms, weight=client_weight)
+
     server_state = tff.federated_map(server_update_fn,
-                                     (server_state, model_delta))
+                                     (server_state, model_delta, client_drift))
 
     aggregated_outputs = dummy_model.federated_output_computation(
         client_outputs.model_output)
     if aggregated_outputs.type_signature.is_struct():
       aggregated_outputs = tff.federated_zip(aggregated_outputs)
-
     return server_state, aggregated_outputs
 
   @tff.federated_computation
