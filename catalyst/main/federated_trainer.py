@@ -70,7 +70,7 @@ with utils_impl.record_hparam_flags() as shared_flags:
   flags.DEFINE_string(
       'cache_dir', None, 'Where to send the datasets')
   flags.mark_flag_as_required('experiment_name')
-  flags.DEFINE_string('root_output_dir', '/ocean/projects/iri180031p/houc/fed_opt',
+  flags.DEFINE_string('root_output_dir', '/ocean/projects/iri180031p/houc/fed_opt/drifts',
                       'Root directory for writing experiment output.')
   flags.DEFINE_integer('total_rounds', 200, 'Number of total training rounds.')
   flags.DEFINE_integer(
