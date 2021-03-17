@@ -89,10 +89,12 @@ class ModelDeltaProcessTest(tf.test.TestCase):
     federated_data = [_batch_fn()]
     model = _uncompiled_model_builder()
     client_optimizer = tf.keras.optimizers.SGD(0.1)
+    server_optimizer = tf.keras.optimizers.SGD(0.1)
     client_update = fed_avg_schedule.create_client_update_fn()
     outputs = client_update(model, federated_data, TAU,
                             fed_avg_schedule._get_weights(model),
-                            client_optimizer)
+                            client_optimizer,
+                            server_optimizer.variables())
     self.assertAllEqual(self.evaluate(outputs.client_weight), 1)
     self.assertAllEqual(
         self.evaluate(outputs.optimizer_output['num_examples']), 1)
@@ -101,10 +103,11 @@ class ModelDeltaProcessTest(tf.test.TestCase):
     federated_data = [_batch_fn(has_nan=True)]
     model = _uncompiled_model_builder()
     client_optimizer = tf.keras.optimizers.SGD(0.1)
+    server_optimizer = tf.keras.optimizers.SGD(0.1)
     client_update = fed_avg_schedule.create_client_update_fn()
     outputs = client_update(model, federated_data, TAU,
                             fed_avg_schedule._get_weights(model),
-                            client_optimizer)
+                            client_optimizer,server_optimizer.variables())
     self.assertAllEqual(self.evaluate(outputs.client_weight), 0)
 
   def test_server_update_with_nan_data_is_noop(self):
@@ -222,7 +225,8 @@ class ModelDeltaProcessTest(tf.test.TestCase):
                     test_model_for_types.trainable_variables,
                     test_model_for_types.non_trainable_variables)),
             optimizer_state=(tf.int64,),
-            round_num=tf.float32), tff.SERVER)
+            round_num=tf.float32,client_drift=tf.float32),
+             tff.SERVER)
     metrics_type = test_model_for_types.federated_output_computation.type_signature.result
 
     expected_parameter_type = collections.OrderedDict(

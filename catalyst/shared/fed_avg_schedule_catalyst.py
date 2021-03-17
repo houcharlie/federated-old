@@ -149,6 +149,7 @@ def create_client_update_fn():
                     tau,
                     initial_weights,
                     client_optimizer,
+                    client_optimizer_weights,
                     client_weight_fn=None):
     """Updates client model.
 
@@ -168,7 +169,8 @@ def create_client_update_fn():
 
     model_weights = _get_weights(model)
     tff.utils.assign(model_weights, initial_weights)
-
+    if not isinstance(client_optimizer, tf.keras.optimizers.SGD):
+      tff.utils.assign(client_optimizer.variables(), client_optimizer_weights)
     num_examples = tf.constant(0, dtype=tf.int32)
     for batch in dataset:
       with tf.GradientTape() as tape:
@@ -282,18 +284,25 @@ def build_fed_avg_process(
       lambda: server_optimizer_fn(server_lr_schedule(0)))
   server_state_type = server_init_tf.type_signature.result
   model_weights_type = server_state_type.model
+  server_optimizer_state_type = server_state_type.optimizer_state
   round_num_type = server_state_type.round_num
 
   tf_dataset_type = tff.SequenceType(dummy_model.input_spec)
   model_input_type = tff.SequenceType(dummy_model.input_spec)
 
-  @tff.tf_computation(model_input_type, model_weights_type, round_num_type)
-  def client_update_fn(tf_dataset, initial_model_weights, round_num):
+  @tff.tf_computation(model_input_type, model_weights_type, round_num_type, server_optimizer_state_type)
+  def client_update_fn(tf_dataset, initial_model_weights, round_num, client_optimizer_weights):
     client_lr = client_lr_schedule(round_num)
     client_optimizer = client_optimizer_fn(client_lr)
     client_update = create_client_update_fn()
+    
+    # if want to add momentum to the client updates
+    if not isinstance(client_optimizer, tf.keras.optimizers.SGD):
+      model = model_fn()
+      _initialize_optimizer_vars(model, client_optimizer)
+    
     return client_update(model_fn(), tf_dataset, tau, initial_model_weights,
-                         client_optimizer, client_weight_fn)
+                         client_optimizer,client_optimizer_weights, client_weight_fn)
 
   @tff.tf_computation(server_state_type, model_weights_type.trainable, tf.float32)
   def server_update_fn(server_state, model_delta, client_drift):
@@ -321,10 +330,10 @@ def build_fed_avg_process(
     """
     client_model = tff.federated_broadcast(server_state.model)
     client_round_num = tff.federated_broadcast(server_state.round_num)
-
+    client_optimizer_weights = tff.federated_broadcast(server_state.optimizer_state)
     client_outputs = tff.federated_map(
         client_update_fn,
-        (federated_dataset, client_model, client_round_num))
+        (federated_dataset, client_model, client_round_num, client_optimizer_weights))
 
     client_weight = client_outputs.client_weight
     model_delta = tff.federated_mean(
