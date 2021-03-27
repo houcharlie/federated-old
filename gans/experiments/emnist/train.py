@@ -46,7 +46,7 @@ with utils_impl.record_new_flags() as hparam_flags:
   flags.DEFINE_string(
       'exp_name', 'test', 'Unique name for the experiment, suitable for use in '
       'filenames.')
-  flags.DEFINE_string('root_output_dir', '/tmp/dp_fed_gan_output/',
+  flags.DEFINE_string('root_output_dir', '/ocean/projects/iri180031p/houc',
                       'Base directory to write experimental output.')
 
   # Input data handling.

@@ -21,7 +21,7 @@ away when b/130724878 is fixed.
 
 import attr
 import tensorflow as tf
-
+import tensorflow_federated as tff
 from gans import gan_losses
 from utils import tensor_utils
 
@@ -87,6 +87,7 @@ class ClientOutput(object):
     counters: Metrics that are summed across clients.
   """
   discriminator_weights_delta = attr.ib()
+  generator_weight_delta = attr.ib()
   update_weight = attr.ib()
   counters = attr.ib()
 
@@ -94,7 +95,6 @@ class ClientOutput(object):
 def _weights(model):
   """Returns tensors of model weights, in the order of the variables."""
   return [v.read_value() for v in model.weights]
-
 
 @tf.function
 def client_computation(
@@ -105,7 +105,10 @@ def client_computation(
     # Python arguments bound to be bound at TFF computation construction time:
     generator: tf.keras.Model,
     discriminator: tf.keras.Model,
-    train_discriminator_fn) -> ClientOutput:
+    disc_optimizer: tf.keras.optimizers.Optimizer,
+    gen_optimizer: tf.keras.optimizers.Optimizer,
+    control_input_gen: tf.keras.Model.weights,
+    control_input_disc: tf.keras.Model.weights) -> ClientOutput:
   """The computation to run on the client, training the discriminator.
 
   Args:
@@ -124,9 +127,9 @@ def client_computation(
                         from_server.generator_weights)
   tf.nest.map_structure(lambda a, b: a.assign(b), discriminator.weights,
                         from_server.discriminator_weights)
-
   num_examples = tf.constant(0)
   gen_inputs_and_real_data = tf.data.Dataset.zip((gen_inputs_ds, real_data_ds))
+  
   for gen_inputs, real_data in gen_inputs_and_real_data:
     # It's possible that real_data and gen_inputs have different batch sizes.
     # For calculating the discriminator loss, it's desirable to have equal-sized
@@ -137,25 +140,157 @@ def client_computation(
     min_batch_size = tf.minimum(tf.shape(real_data)[0], tf.shape(gen_inputs)[0])
     real_data = real_data[0:min_batch_size]
     gen_inputs = gen_inputs[0:min_batch_size]
-    num_examples += train_discriminator_fn(generator, discriminator, gen_inputs,
-                                           real_data)
+    with tf.GradientTape() as tape:
+      gen_loss = loss_fns.generator_loss(generator, discriminator, gen_inputs)
+      disc_loss = loss_fns.discriminator_loss(generator, discriminator, gen_inputs, 
+                                            real_data)      
+    # apply the gradient                        
+    disc_grads = tape.gradient(disc_loss, discriminator.weights)
+    disc_grads_and_vars = zip(disc_grads, discriminator.weights)
+    gen_grads = tape.gradient(gen_loss, generator.weights)
+    gen_grads_and_vars = zip(gen_grads, generator.weights)
+    disc_optimizer.apply_gradients(grads_and_vars)
+    gen_optimizer.apply_gradients(grads_and_vars)
 
-  weights_delta = tf.nest.map_structure(tf.subtract, discriminator.weights,
+    # apply the adjustment
+    disc_adj_gv = tf.nest.map_structure(lambda x,v: (x,v), control_input_disc, 
+                                        discriminator.weights)
+    gen_adj_gv = tf.nest.map_structure(lambda x,v: (x,v), control_input_gen,
+                                        generator.weights)
+
+    disc_optimizer.apply_gradients(disc_adj_gv)
+    gen_optimizer.apply_gradients(gen_adj_gv)
+    num_examples += min_batch_size
+
+
+  disc_delta = tf.nest.map_structure(lambda a: a/num_examples_float, zero_disc)
+  gen_delta = tf.nest.map_structure(lambda a: a/num_examples_float, zero_gen)
+
+  disc_delta = tf.nest.map_structure(tf.subtract, discriminator.weights,
                                         from_server.discriminator_weights)
-  weights_delta, has_non_finite_delta = (
-      tensor_utils.zero_all_if_any_non_finite(weights_delta))
+  gen_delta = tf.nest.map_structure(tf.subtract, generator.weights,
+                                        from_server.generator_weights)
+  disc_delta, disc_has_non_finite_delta = (
+      tensor_utils.zero_all_if_any_non_finite(disc_delta))
+  gen_delta, gen_has_non_finite_delta = (
+      tensor_utils.zero_all_if_any_non_finite(gen_delta))   
   update_weight = tf.cast(num_examples, tf.float32)
   # Zero out the weight if there are any non-finite values.
   # TODO(b/122071074): federated_mean might not do the right thing if
   # all clients have zero weight.
-  update_weight = tf.cond(
-      tf.equal(has_non_finite_delta, 0), lambda: update_weight,
+  update_weight_disc = tf.cond(
+      tf.equal(disc_has_non_finite_delta, 0), lambda: update_weight,
       lambda: tf.constant(0.0))
+  update_weight_gen = tf.cond(
+      tf.equal(gen_has_non_finite_delta, 0), lambda: update_weight,
+      lambda: tf.constant(0.0))   
+  update_weight = tf.math.minimum(update_weight_disc, update_weight_gen) 
   return ClientOutput(
-      discriminator_weights_delta=weights_delta,
+      discriminator_weights_delta=disc_delta,
+      generator_weights_delta=gen_delta,
       update_weight=update_weight,
       counters={'num_discriminator_train_examples': num_examples})
 
+@tf.function
+def client_control(
+    # Tensor/Dataset arguments that will be supplied by TFF:
+    gen_inputs_ds: tf.data.Dataset,
+    real_data_ds: tf.data.Dataset,
+    from_server: FromServer,
+    # Python arguments bound to be bound at TFF computation construction time:
+    generator: tf.keras.Model,
+    discriminator: tf.keras.Model,
+    disc_optimizer: tf.keras.optimizers.Optimizer,
+    gen_optimizer: tf.keras.optimizers.Optimizer,
+    zero_disc: tf.keras.Model.weights,
+    zero_gen: tf.keras.Model.weights) -> ClientOutput:
+  """The computation to run on the client, training the discriminator.
+
+  Args:
+    gen_inputs_ds: A `tf.data.Dataset` of generator_inputs.
+    real_data_ds: A `tf.data.Dataset` of data from the real distribution.
+    from_server: A `FromServer` object, including the current model weights.
+    generator:  The generator.
+    discriminator: The discriminator.
+    train_discriminator_fn: A function which takes the two networks, generator
+      input, and real data and trains the discriminator.
+
+  Returns:
+    A `ClientOutput` object.
+  """
+  tf.nest.map_structure(lambda a, b: a.assign(b), generator.weights,
+                        from_server.generator_weights)
+  tf.nest.map_structure(lambda a, b: a.assign(b), discriminator.weights,
+                        from_server.discriminator_weights)
+  num_examples = tf.constant(0)
+  gen_inputs_and_real_data = tf.data.Dataset.zip((gen_inputs_ds, real_data_ds))
+  
+  for gen_inputs, real_data in gen_inputs_and_real_data:
+    # It's possible that real_data and gen_inputs have different batch sizes.
+    # For calculating the discriminator loss, it's desirable to have equal-sized
+    # contributions from both the real and fake data. Also, it's necessary if
+    # using the Wasserstein gradient penalty (where a difference is taken b/w
+    # the real and fake data). So here we reduce to the min batch size. This
+    # also ensures num_examples properly reflects the amount of data trained on.
+    min_batch_size = tf.minimum(tf.shape(real_data)[0], tf.shape(gen_inputs)[0])
+    real_data = real_data[0:min_batch_size]
+    gen_inputs = gen_inputs[0:min_batch_size]
+    # reset the gen/discriminator values so there's no moving
+    tf.nest.map_structure(lambda a, b: a.assign(b), generator.weights,
+                        from_server.generator_weights)
+    tf.nest.map_structure(lambda a, b: a.assign(b), discriminator.weights,
+                          from_server.discriminator_weights)
+    with tf.GradientTape() as tape:
+      gen_loss = loss_fns.generator_loss(generator, discriminator, gen_inputs)
+      disc_loss = loss_fns.discriminator_loss(generator, discriminator, gen_inputs, 
+                                            real_data)  
+    # get disc grads
+    disc_grads = tape.gradient(disc_loss, discriminator.weights)
+    disc_grads_and_vars = zip(disc_grads, discriminator.weights)
+
+    # get gen grads
+    gen_grads = tape.gradient(gen_loss, generator.weights)
+    gen_grads_and_vars = zip(gen_grads, generator.weights)
+    
+    #apply the gradients
+    disc_optimizer.apply_gradients(grads_and_vars)
+    gen_optimizer.apply_gradients(grads_and_vars)
+
+    #find the deltas
+    disc_delta = tf.nest.map_structure(tf.subtract, discriminator.weights,
+                                        from_server.discriminator_weights)
+
+    gen_delta = tf.nest.map_structure(tf.subtract, generator.weights,
+                                        from_server.generator_weights)
+    # add to buffers
+    zero_disc = tf.nest.map_structure(lambda a, b: a + b, zero_disc, disc_delta)
+    zero_gen = tf.nest.map_structure(lambda a, b: a + b, zero_gen, gen_delta)
+
+    num_examples += min_batch_size
+  num_examples_float = tf.cast(num_examples, tf.float32)
+  disc_delta = tf.nest.map_structure(lambda a: a/num_examples_float, zero_disc)
+  gen_delta = tf.nest.map_structure(lambda a: a/num_examples_float, zero_gen)
+
+  disc_delta, disc_has_non_finite_delta = (
+      tensor_utils.zero_all_if_any_non_finite(disc_delta))
+  gen_delta, gen_has_non_finite_delta = (
+      tensor_utils.zero_all_if_any_non_finite(gen_delta))   
+  update_weight = tf.cast(num_examples, tf.float32)
+  # Zero out the weight if there are any non-finite values.
+  # TODO(b/122071074): federated_mean might not do the right thing if
+  # all clients have zero weight.
+  update_weight_disc = tf.cond(
+      tf.equal(disc_has_non_finite_delta, 0), lambda: update_weight,
+      lambda: tf.constant(0.0))
+  update_weight_gen = tf.cond(
+      tf.equal(gen_has_non_finite_delta, 0), lambda: update_weight,
+      lambda: tf.constant(0.0))   
+  update_weight = tf.math.minimum(update_weight_disc, update_weight_gen) 
+  return ClientOutput(
+      discriminator_weights_delta=disc_delta,
+      generator_weights_delta=gen_delta,
+      update_weight=update_weight,
+      counters={'num_discriminator_train_examples': num_examples})
 
 def server_initial_state(generator, discriminator):
   """Returns the initial state of the server."""
@@ -174,14 +309,8 @@ def server_initial_state(generator, discriminator):
 def server_computation(
     # Tensor/Dataset arguments that will be supplied by TFF:
     server_state: ServerState,
-    gen_inputs_ds: tf.data.Dataset,
-    client_output: ClientOutput,
-    # Python arguments to be bound at TFF computation construction time:
-    generator: tf.keras.Model,
-    discriminator: tf.keras.Model,
-    server_disc_update_optimizer: tf.keras.optimizers.Optimizer,
-    train_generator_fn,
-    new_aggregation_state=()) -> ServerState:
+    gen_delta: tf.keras.Model.weights,
+    disc_delta: tf.keras.Model.weights) -> ServerState:
   """The computation to run on the server, training the generator.
 
   Args:
@@ -208,26 +337,23 @@ def server_computation(
                         server_state.generator_weights)
   tf.nest.map_structure(lambda a, b: a.assign(b), discriminator.weights,
                         server_state.discriminator_weights)
-
-  # Update the server discriminator.
-  delta = client_output.discriminator_weights_delta
-  tf.nest.assert_same_structure(delta, discriminator.weights)
-  grads_and_vars = tf.nest.map_structure(lambda x, v: (-1.0 * x, v), delta,
+  server_gen_update_optimizer = tf.keras.optimizers.SGD(learning_rate=1)
+  server_disc_update_optimizer = tf.keras.optimizers.SGD(learning_rate=1)
+  tf.nest.assert_same_structure(disc_delta, discriminator.weights)
+  grads_and_vars_disc = tf.nest.map_structure(lambda x, v: (-1.0 * x, v), disc_delta,
                                          discriminator.weights)
+  grads_and_vars_gen = tf.nest.map_structure(lambda x, v: (-1.0 * x, v), gen_delta,
+                                         generator.weights)
   server_disc_update_optimizer.apply_gradients(
-      grads_and_vars, name='server_update')
+      grads_and_vars_disc, name='server_update_disc')
+  server_gen_update_optimizer.apply_gradients(
+      grads_and_vars_gen, name='server_update_gen'
+  )
 
   for k, v in client_output.counters.items():
     server_state.counters[k] += v
 
-  # Update the state of the (possibly DP) averaging aggregator.
-  server_state.aggregation_state = new_aggregation_state
-
   gen_examples_this_round = tf.constant(0)
-
-  for gen_inputs in gen_inputs_ds:  # Compiled by autograph.
-    gen_examples_this_round += train_generator_fn(generator, discriminator,
-                                                  gen_inputs)
 
   server_state.counters[
       'num_generator_train_examples'] += gen_examples_this_round

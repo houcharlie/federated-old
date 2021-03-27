@@ -171,7 +171,47 @@ def build_server_initial_state_comp(gan: GanFnsAndTypes):
   return server_initial_state
 
 
-def build_client_computation(gan: GanFnsAndTypes):
+def build_client_computation(gan: GanFnsAndTypes,
+                              disc_optimizer: tf.keras.optimizers.Optimizer,
+                              gen_optimizer: tf.keras.optimizers.Optimizer):
+  """Returns a `tff.tf_computation` for the `client_computation`.
+
+  This is a thin wrapper around `gan_training_tf_fns.client_computation`.
+
+  Args:
+    gan: A `GanFnsAndTypes` object.
+
+  Returns:
+    A `tff.tf_computation.`
+  """
+
+  @tff.tf_computation(
+      tff.SequenceType(gan.gen_input_type),
+      tff.SequenceType(gan.real_data_type), gan.from_server_type,
+      gan.from_server_type.generator_weights,
+      gan.from_server_type.discriminator_weights)
+  def client_computation(gen_inputs, 
+                        real_data, 
+                        from_server, 
+                        control_input_gen,
+                        control_input_disc):
+    """Returns the client_output."""
+    return gan_training_tf_fns.client_computation(
+        gen_inputs_ds=gen_inputs,
+        real_data_ds=real_data,
+        from_server=from_server,
+        generator=gan.generator_model_fn(),
+        discriminator=gan.discriminator_model_fn(),
+        gen_optimizer=gen_optimizer,
+        disc_optimizer=disc_optimizer,
+        control_input_gen=control_input_gen,
+        control_input_disc=control_input_disc)
+
+  return client_computation
+
+def build_control_computation(gan: GanFnsAndTypes,
+                              disc_optimizer: tf.keras.optimizers.Optimizer,
+                              gen_optimizer: tf.keras.optimizers.Optimizer):
   """Returns a `tff.tf_computation` for the `client_computation`.
 
   This is a thin wrapper around `gan_training_tf_fns.client_computation`.
@@ -186,22 +226,28 @@ def build_client_computation(gan: GanFnsAndTypes):
   @tff.tf_computation(
       tff.SequenceType(gan.gen_input_type),
       tff.SequenceType(gan.real_data_type), gan.from_server_type)
-  def client_computation(gen_inputs, real_data, from_server):
+  def control_computation(gen_inputs, real_data, from_server):
     """Returns the client_output."""
-    return gan_training_tf_fns.client_computation(
+    generator = gan.generator_model_fn()
+    discriminator = gan.discriminator_model_fn()
+    zero_gen = tf.nest.map_structure(tf.zeros_like, generator.weights)
+    zero_disc = tf.nest.map_structure(tf.zeros_like, discriminator.weights)
+    return gan_training_tf_fns.client_control(
         gen_inputs_ds=gen_inputs,
         real_data_ds=real_data,
         from_server=from_server,
-        generator=gan.generator_model_fn(),
-        discriminator=gan.discriminator_model_fn(),
-        train_discriminator_fn=gan.train_discriminator_fn)
+        generator= generator,
+        discriminator= discriminator,
+        disc_optimizer = disc_optimizer,
+        gen_optimizer = gen_optimizer,
+        zero_gen=zero_gen,
+        zero_disc=zero_disc)
 
   return client_computation
 
-
 def build_server_computation(gan: GanFnsAndTypes, server_state_type: tff.Type,
-                             client_output_type: tff.Type,
-                             aggregation_state_type: tff.Type):
+                             disc_optimizer: tf.keras.optimizers.Optimizer,
+                              gen_optimizer: tf.keras.optimizers.Optimizer):
   """Returns a `tff.tf_computation` for the `server_computation`.
 
   This is a thin wrapper around `gan_training_tf_fns.server_computation`.
@@ -217,25 +263,24 @@ def build_server_computation(gan: GanFnsAndTypes, server_state_type: tff.Type,
     A `tff.tf_computation.`
   """
 
-  @tff.tf_computation(server_state_type, tff.SequenceType(gan.gen_input_type),
-                      client_output_type, aggregation_state_type)
-  def server_computation(server_state, gen_inputs, client_output,
-                         new_aggregation_state):
+  @tff.tf_computation(server_state_type, 
+                      gan.from_server_type.generator_weights,
+                      gan.from_server_type.discriminator_weights)
+  def server_computation(server_state,gen_delta,disc_delta):
     """The wrapped server_computation."""
     return gan_training_tf_fns.server_computation(
         server_state=server_state,
-        gen_inputs_ds=gen_inputs,
-        client_output=client_output,
-        generator=gan.generator_model_fn(),
-        discriminator=gan.discriminator_model_fn(),
-        server_disc_update_optimizer=gan.server_disc_update_optimizer_fn(),
-        train_generator_fn=gan.train_generator_fn,
-        new_aggregation_state=new_aggregation_state)
+        gen_delta=gen_delta,
+        disc_delta=disc_delta)
 
   return server_computation
 
 
-def build_gan_training_process(gan: GanFnsAndTypes):
+def build_gan_training_process(gan: GanFnsAndTypes, 
+                                gen_optimizer: tf.keras.optimizers.Optimizer,
+                                disc_optimizer: tf.keras.optimizers.Optimizer,
+                                tau: float,
+                                control: bool):
   """Constructs a `tff.Computation` for GAN training.
 
   Args:
@@ -248,7 +293,10 @@ def build_gan_training_process(gan: GanFnsAndTypes):
   # Generally, it is easiest to get the types correct by building
   # all of the needed tf_computations first, since this ensures we only
   # have non-federated types.
-  client_computation = build_client_computation(gan)
+  client_computation = build_client_computation(gan, gen_optimizer, disc_optimizer, 
+                                                    tau)
+  control_computation = build_control_computation(gan, gen_optimizer, disc_optimizer, 
+                                                    tau)
   client_output_type = client_computation.type_signature.result
 
   @tff.federated_computation
@@ -273,42 +321,46 @@ def build_gan_training_process(gan: GanFnsAndTypes):
         generator_weights=server_state.generator_weights,
         discriminator_weights=server_state.discriminator_weights)
     client_input = tff.federated_broadcast(from_server)
+
+    # calculate the control variates
+    control_output = tff.federated_map(
+        control_computation, (client_gen_inputs, client_real_data, client_input))
+    central_control_gen = tff.federated_broadcast(tff.federated_mean(
+        control_output.generator_weights_delta, weight=control_output.update_weight
+    ))
+    central_control_disc = tff.federated_broadcast(tff.federated_mean(
+        control_output.discriminator_weights_delta, weight=control_output.update_weight
+    ))
+    @tff.tf.computation(client_output_type.generator_weights_delta,
+                        client_output_type.generator_weights_delta)
+    def compute_control_input_gen(own_gen, server_gen):
+      adj_gen = tf.nest.map_structure(lambda a, b: a - b, server_gen, own_gen)
+      return tf.cond(control, lambda: adj_gen, 
+          lambda: tf.nest.map_structure(tf.zeros_like, server_gen))
+    @tff.tf.computation(client_output_type.discriminator_weights_delta,
+                        client_output_type.discriminator_weights_delta)
+    def compute_control_input_disc(own_disc, server_disc):
+      adj_disc = tf.nest.map_structure(lambda a, b: a - b, server_disc, own_disc)
+      return tf.cond(control, lambda: adj_disc, 
+          lambda: tf.nest.map_structure(tf.zeros_like, serverdisc))
+    
+    control_input_gen = tff.federated_map(
+      compute_control_input_gen, (control_output.generator_weights_delta, central_control_gen)
+    )
+    control_input_disc = tff.federated_map(
+      compute_control_input_disc, (control_output.discriminator_weights_delta, central_control_disc)
+    )
     client_outputs = tff.federated_map(
-        client_computation, (client_gen_inputs, client_real_data, client_input))
+        client_computation, (client_gen_inputs, client_real_data, client_input, 
+                            control_input_gen, control_input_disc))
 
-    # Note that weight goes unused here if the aggregation is involving
-    # Differential Privacy; the underlying AggregationProcess doesn't take the
-    # parameter, as it just uniformly weights the clients.
-    if len(gan.aggregation_process.next.type_signature.parameter) == 3:
-      aggregation_output = gan.aggregation_process.next(
-          server_state.aggregation_state,
-          client_outputs.discriminator_weights_delta,
-          client_outputs.update_weight)
-    else:
-      aggregation_output = gan.aggregation_process.next(
-          server_state.aggregation_state,
-          client_outputs.discriminator_weights_delta)
-
-    new_aggregation_state = aggregation_output.state
-    averaged_discriminator_weights_delta = aggregation_output.result
-
-    # TODO(b/131085687): Perhaps reconsider the choice to also use
-    # ClientOutput to hold the aggregated client output.
-    aggregated_client_output = gan_training_tf_fns.ClientOutput(
-        discriminator_weights_delta=averaged_discriminator_weights_delta,
-        # We don't actually need the aggregated update_weight, but
-        # this keeps the types of the non-aggregated and aggregated
-        # client_output the same, which is convenient. And I can
-        # imagine wanting this.
-        update_weight=tff.federated_sum(client_outputs.update_weight),
-        counters=tff.federated_sum(client_outputs.counters))
+    gen_delta = tff.federated_mean(client_outputs.generator_weights_delta, weight=client_outputs.update_weight)
+    disc_delta = tff.federated_mean(client_outputs.discriminator_weights_delta, weight=client_outputs.update_weight)
 
     server_computation = build_server_computation(
-        gan, server_state.type_signature.member, client_output_type,
-        gan.aggregation_process.state_type.member)
+        gan, server_state.type_signature.member, disc_optimizer, gen_optimizer)
     server_state = tff.federated_map(
-        server_computation, (server_state, server_gen_inputs,
-                             aggregated_client_output, new_aggregation_state))
+        server_computation, (server_state, gen_delta, disc_delta))
     return server_state
 
   return tff.templates.IterativeProcess(fed_server_initial_state, run_one_round)

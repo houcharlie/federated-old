@@ -173,6 +173,11 @@ def create_client_update_fn():
       tff.utils.assign(client_optimizer.variables(), client_optimizer_weights)
     num_examples = tf.constant(0, dtype=tf.int32)
     for batch in dataset:
+      '''
+      ### one-step
+      tff.utils.assign(model_weights, initial_weights)
+      ### one-step
+      '''
       with tf.GradientTape() as tape:
         output = model.forward_pass(batch)
         loss = output.loss
@@ -185,12 +190,21 @@ def create_client_update_fn():
       num_examples += tf.shape(output.predictions)[0]
 
     aggregated_outputs = model.report_local_outputs()
+    
     weights_delta = tf.nest.map_structure(lambda a, b: a - b,
                                           model_weights.trainable,
                                           initial_weights.trainable)
+    '''
+    ### one-step
+    weights_delta = tf.nest.map_structure(lambda a, b: (a - b)/tf.cast(num_examples,tf.float32),
+                                          model_weights.trainable,
+                                          initial_weights.trainable)
+    ### one-step
     weights_delta, has_non_finite_weight = (
         tensor_utils.zero_all_if_any_non_finite(weights_delta))
-
+    '''
+    final_model = tf.nest.map_structure(lambda a, b: a + b, weights_delta, 
+                                          initial_weights.trainable)
     if has_non_finite_weight > 0:
       client_weight = tf.constant(0, dtype=tf.float32)
     elif client_weight_fn is None:
@@ -199,7 +213,7 @@ def create_client_update_fn():
       client_weight = client_weight_fn(aggregated_outputs)
 
     return ClientOutput(
-        model_weights.trainable,
+        final_model,
         weights_delta, client_weight, aggregated_outputs,
         collections.OrderedDict([('num_examples', num_examples)]))
 

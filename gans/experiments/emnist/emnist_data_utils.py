@@ -32,7 +32,7 @@ def create_real_images_tff_client_data(split='train', num_pseudo_clients=1):
         num_pseudo_clients=num_pseudo_clients)
 
   train_tff_data, eval_tff_data = tff.simulation.datasets.emnist.load_data(
-      only_digits=False)
+      only_digits=False, cache_dir='/ocean/projects/iri180031p/houc')
   if split == 'train':
     return tff.simulation.datasets.emnist.get_infinite(
         train_tff_data, num_pseudo_clients=num_pseudo_clients)

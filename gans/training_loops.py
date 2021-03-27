@@ -203,7 +203,9 @@ def federated_training_loop(gan: tff_gans.GanFnsAndTypes,
                             rounds_per_eval=1,
                             eval_hook=lambda *args: None,
                             rounds_per_checkpoint=5,
-                            root_checkpoint_dir=None):
+                            root_checkpoint_dir=None,
+                            control=True,
+                            tau=0):
   """A simple federated training loop.
 
   Args:
@@ -227,7 +229,7 @@ def federated_training_loop(gan: tff_gans.GanFnsAndTypes,
   """
   logging.info('Starting federated_training_loop.')
   start_time = time.time()
-  process = tff_gans.build_gan_training_process(gan)
+  process = tff_gans.build_gan_training_process(gan, tau, control)
   server_state = process.initialize()
   logging.info(
       'Built processes and computed initial state in {:.2f} seconds'.format(

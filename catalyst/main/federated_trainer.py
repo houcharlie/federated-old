@@ -62,7 +62,7 @@ with utils_impl.record_hparam_flags() as shared_flags:
                        'How many clients to sample per round.')
   flags.DEFINE_integer('client_datasets_random_seed', 1,
                        'Random seed for client sampling.')
-  flags.DEFINE_float('tau', 1., 'The amount of catalyst regularization')
+  flags.DEFINE_float('tau', 0, 'The amount of catalyst regularization')
   # Training loop configuration
   flags.DEFINE_string(
       'experiment_name', None, 'The name of this experiment. Will be append to '
