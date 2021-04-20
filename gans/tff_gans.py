@@ -17,9 +17,10 @@ import attr
 import tensorflow as tf
 import tensorflow_federated as tff
 import tensorflow_privacy
-
+from typing import Callable
 from gans import gan_training_tf_fns
 
+OptimizerBuilder = Callable[[], tf.keras.optimizers.Optimizer]
 
 def tensor_spec_for_batch(dummy_batch):
   """Returns a TensorSpec for the given batch."""
@@ -131,7 +132,9 @@ class GanFnsAndTypes(object):
 
     self.from_server_type = gan_training_tf_fns.FromServer(
         generator_weights=self.generator_weights_type,
-        discriminator_weights=self.discriminator_weights_type)
+        discriminator_weights=self.discriminator_weights_type,
+        meta_gen=self.generator_weights_type,
+        meta_disc=self.discriminator_weights_type)
 
     self.client_gen_input_type = tff.type_at_clients(
         tff.SequenceType(self.gen_input_type))
@@ -172,8 +175,9 @@ def build_server_initial_state_comp(gan: GanFnsAndTypes):
 
 
 def build_client_computation(gan: GanFnsAndTypes,
-                              disc_optimizer: tf.keras.optimizers.Optimizer,
-                              gen_optimizer: tf.keras.optimizers.Optimizer):
+                              disc_optimizer_fn: OptimizerBuilder,
+                              gen_optimizer_fn: OptimizerBuilder,
+                              tau: float):
   """Returns a `tff.tf_computation` for the `client_computation`.
 
   This is a thin wrapper around `gan_training_tf_fns.client_computation`.
@@ -202,16 +206,18 @@ def build_client_computation(gan: GanFnsAndTypes,
         from_server=from_server,
         generator=gan.generator_model_fn(),
         discriminator=gan.discriminator_model_fn(),
-        gen_optimizer=gen_optimizer,
-        disc_optimizer=disc_optimizer,
+        gen_optimizer=gen_optimizer_fn(),
+        disc_optimizer=disc_optimizer_fn(),
         control_input_gen=control_input_gen,
-        control_input_disc=control_input_disc)
+        control_input_disc=control_input_disc,
+        tau=tau)
 
   return client_computation
 
 def build_control_computation(gan: GanFnsAndTypes,
-                              disc_optimizer: tf.keras.optimizers.Optimizer,
-                              gen_optimizer: tf.keras.optimizers.Optimizer):
+                              disc_optimizer_fn: OptimizerBuilder,
+                              gen_optimizer_fn: OptimizerBuilder,
+                              tau: float):
   """Returns a `tff.tf_computation` for the `client_computation`.
 
   This is a thin wrapper around `gan_training_tf_fns.client_computation`.
@@ -236,18 +242,17 @@ def build_control_computation(gan: GanFnsAndTypes,
         gen_inputs_ds=gen_inputs,
         real_data_ds=real_data,
         from_server=from_server,
-        generator= generator,
+        generator=generator,
         discriminator= discriminator,
-        disc_optimizer = disc_optimizer,
-        gen_optimizer = gen_optimizer,
-        zero_gen=zero_gen,
-        zero_disc=zero_disc)
+        disc_optimizer = disc_optimizer_fn(),
+        gen_optimizer = gen_optimizer_fn(),
+        zero_gen=gan.generator_model_fn(),
+        zero_disc=gan.discriminator_model_fn(),
+        tau=tau)
 
-  return client_computation
+  return control_computation
 
-def build_server_computation(gan: GanFnsAndTypes, server_state_type: tff.Type,
-                             disc_optimizer: tf.keras.optimizers.Optimizer,
-                              gen_optimizer: tf.keras.optimizers.Optimizer):
+def build_server_computation(gan: GanFnsAndTypes, server_state_type: tff.Type):
   """Returns a `tff.tf_computation` for the `server_computation`.
 
   This is a thin wrapper around `gan_training_tf_fns.server_computation`.
@@ -271,14 +276,18 @@ def build_server_computation(gan: GanFnsAndTypes, server_state_type: tff.Type,
     return gan_training_tf_fns.server_computation(
         server_state=server_state,
         gen_delta=gen_delta,
-        disc_delta=disc_delta)
+        disc_delta=disc_delta,
+        generator=gan.generator_model_fn(),
+        discriminator=gan.discriminator_model_fn(),
+        gen_optimizer=tf.keras.optimizers.SGD(lr=1),
+        disc_optimizer=tf.keras.optimizers.SGD(lr=1))
 
   return server_computation
 
 
 def build_gan_training_process(gan: GanFnsAndTypes, 
-                                gen_optimizer: tf.keras.optimizers.Optimizer,
-                                disc_optimizer: tf.keras.optimizers.Optimizer,
+                                gen_optimizer_fn: OptimizerBuilder,
+                                disc_optimizer_fn: OptimizerBuilder,
                                 tau: float,
                                 control: bool):
   """Constructs a `tff.Computation` for GAN training.
@@ -293,12 +302,11 @@ def build_gan_training_process(gan: GanFnsAndTypes,
   # Generally, it is easiest to get the types correct by building
   # all of the needed tf_computations first, since this ensures we only
   # have non-federated types.
-  client_computation = build_client_computation(gan, gen_optimizer, disc_optimizer, 
+  client_computation = build_client_computation(gan, gen_optimizer_fn, disc_optimizer_fn, 
                                                     tau)
-  control_computation = build_control_computation(gan, gen_optimizer, disc_optimizer, 
+  control_computation = build_control_computation(gan, gen_optimizer_fn, disc_optimizer_fn, 
                                                     tau)
   client_output_type = client_computation.type_signature.result
-
   @tff.federated_computation
   def fed_server_initial_state():
     state = tff.federated_eval(build_server_initial_state_comp(gan), tff.SERVER)
@@ -306,6 +314,8 @@ def build_gan_training_process(gan: GanFnsAndTypes,
         gan_training_tf_fns.ServerState(
             state.generator_weights,
             state.discriminator_weights,
+            state.meta_gen,
+            state.meta_disc,
             state.counters,
             aggregation_state=gan.aggregation_process.initialize()))
     return server_initial_state
@@ -319,7 +329,9 @@ def build_gan_training_process(gan: GanFnsAndTypes,
     """The `tff.Computation` to be returned."""
     from_server = gan_training_tf_fns.FromServer(
         generator_weights=server_state.generator_weights,
-        discriminator_weights=server_state.discriminator_weights)
+        discriminator_weights=server_state.discriminator_weights,
+        meta_gen=server_state.meta_gen,
+        meta_disc=server_state.meta_disc)
     client_input = tff.federated_broadcast(from_server)
 
     # calculate the control variates
@@ -331,18 +343,18 @@ def build_gan_training_process(gan: GanFnsAndTypes,
     central_control_disc = tff.federated_broadcast(tff.federated_mean(
         control_output.discriminator_weights_delta, weight=control_output.update_weight
     ))
-    @tff.tf.computation(client_output_type.generator_weights_delta,
+    @tff.tf_computation(client_output_type.generator_weights_delta,
                         client_output_type.generator_weights_delta)
     def compute_control_input_gen(own_gen, server_gen):
       adj_gen = tf.nest.map_structure(lambda a, b: a - b, server_gen, own_gen)
-      return tf.cond(control, lambda: adj_gen, 
+      return tf.cond(tf.constant(control,dtype=tf.bool), lambda: adj_gen, 
           lambda: tf.nest.map_structure(tf.zeros_like, server_gen))
-    @tff.tf.computation(client_output_type.discriminator_weights_delta,
+    @tff.tf_computation(client_output_type.discriminator_weights_delta,
                         client_output_type.discriminator_weights_delta)
     def compute_control_input_disc(own_disc, server_disc):
       adj_disc = tf.nest.map_structure(lambda a, b: a - b, server_disc, own_disc)
-      return tf.cond(control, lambda: adj_disc, 
-          lambda: tf.nest.map_structure(tf.zeros_like, serverdisc))
+      return tf.cond(tf.constant(control,dtype=tf.bool), lambda: adj_disc, 
+          lambda: tf.nest.map_structure(tf.zeros_like, server_disc))
     
     control_input_gen = tff.federated_map(
       compute_control_input_gen, (control_output.generator_weights_delta, central_control_gen)
@@ -358,7 +370,7 @@ def build_gan_training_process(gan: GanFnsAndTypes,
     disc_delta = tff.federated_mean(client_outputs.discriminator_weights_delta, weight=client_outputs.update_weight)
 
     server_computation = build_server_computation(
-        gan, server_state.type_signature.member, disc_optimizer, gen_optimizer)
+        gan, server_state.type_signature.member)
     server_state = tff.federated_map(
         server_computation, (server_state, gen_delta, disc_delta))
     return server_state

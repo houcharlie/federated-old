@@ -205,7 +205,9 @@ def federated_training_loop(gan: tff_gans.GanFnsAndTypes,
                             rounds_per_checkpoint=5,
                             root_checkpoint_dir=None,
                             control=True,
-                            tau=0):
+                            tau=0,
+                            gen_optimizer_fn=lambda: tf.keras.optimizers.SGD(lr=0.001),
+                            disc_optimizer_fn=lambda: tf.keras.optimizers.SGD(lr=0.001)):
   """A simple federated training loop.
 
   Args:
@@ -229,7 +231,7 @@ def federated_training_loop(gan: tff_gans.GanFnsAndTypes,
   """
   logging.info('Starting federated_training_loop.')
   start_time = time.time()
-  process = tff_gans.build_gan_training_process(gan, tau, control)
+  process = tff_gans.build_gan_training_process(gan, gen_optimizer_fn, disc_optimizer_fn, tau, control)
   server_state = process.initialize()
   logging.info(
       'Built processes and computed initial state in {:.2f} seconds'.format(
@@ -264,7 +266,6 @@ def federated_training_loop(gan: tff_gans.GanFnsAndTypes,
   while round_num < total_rounds:
     if round_num % rounds_per_eval == 0:
       do_eval(round_num, server_state)
-
     client_gen_inputs, client_real_inputs = zip(*client_datasets_fn(round_num))
     server_state = process.next(server_state, server_gen_inputs_fn(round_num),
                                 client_gen_inputs, client_real_inputs)

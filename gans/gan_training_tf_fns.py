@@ -51,6 +51,8 @@ class FromServer(object):
   """
   generator_weights = attr.ib()
   discriminator_weights = attr.ib()
+  meta_gen = attr.ib()
+  meta_disc = attr.ib()
 
 
 # Set cmp=False to get a default hash function for tf.function.
@@ -71,6 +73,8 @@ class ServerState(object):
   """
   generator_weights = attr.ib()
   discriminator_weights = attr.ib()
+  meta_gen = attr.ib()
+  meta_disc = attr.ib()
   counters = attr.ib()
   aggregation_state = attr.ib(default=())
 
@@ -87,7 +91,7 @@ class ClientOutput(object):
     counters: Metrics that are summed across clients.
   """
   discriminator_weights_delta = attr.ib()
-  generator_weight_delta = attr.ib()
+  generator_weights_delta = attr.ib()
   update_weight = attr.ib()
   counters = attr.ib()
 
@@ -108,7 +112,8 @@ def client_computation(
     disc_optimizer: tf.keras.optimizers.Optimizer,
     gen_optimizer: tf.keras.optimizers.Optimizer,
     control_input_gen: tf.keras.Model.weights,
-    control_input_disc: tf.keras.Model.weights) -> ClientOutput:
+    control_input_disc: tf.keras.Model.weights,
+    tau: float) -> ClientOutput:
   """The computation to run on the client, training the discriminator.
 
   Args:
@@ -127,9 +132,11 @@ def client_computation(
                         from_server.generator_weights)
   tf.nest.map_structure(lambda a, b: a.assign(b), discriminator.weights,
                         from_server.discriminator_weights)
+  meta_gen = from_server.meta_gen
+  meta_disc = from_server.meta_disc
   num_examples = tf.constant(0)
   gen_inputs_and_real_data = tf.data.Dataset.zip((gen_inputs_ds, real_data_ds))
-  
+  loss_fns = gan_losses.WassersteinGanLossFns()
   for gen_inputs, real_data in gen_inputs_and_real_data:
     # It's possible that real_data and gen_inputs have different batch sizes.
     # For calculating the discriminator loss, it's desirable to have equal-sized
@@ -140,31 +147,32 @@ def client_computation(
     min_batch_size = tf.minimum(tf.shape(real_data)[0], tf.shape(gen_inputs)[0])
     real_data = real_data[0:min_batch_size]
     gen_inputs = gen_inputs[0:min_batch_size]
-    with tf.GradientTape() as tape:
+    with tf.GradientTape() as tape_gen:
       gen_loss = loss_fns.generator_loss(generator, discriminator, gen_inputs)
+      for i in range(len(generator.weights)):
+        gen_loss += tau*tf.nn.l2_loss(generator.weights[i] - meta_gen[i])
+    with tf.GradientTape() as tape_disc:
       disc_loss = loss_fns.discriminator_loss(generator, discriminator, gen_inputs, 
-                                            real_data)      
+                                            real_data)     
+      for i in range(len(discriminator.weights)):
+        disc_loss += tau*tf.nn.l2_loss(discriminator.weights[i] - meta_disc[i])     
     # apply the gradient                        
-    disc_grads = tape.gradient(disc_loss, discriminator.weights)
+    disc_grads = tape_disc.gradient(disc_loss, discriminator.weights)
     disc_grads_and_vars = zip(disc_grads, discriminator.weights)
-    gen_grads = tape.gradient(gen_loss, generator.weights)
+    gen_grads = tape_gen.gradient(gen_loss, generator.weights)
     gen_grads_and_vars = zip(gen_grads, generator.weights)
-    disc_optimizer.apply_gradients(grads_and_vars)
-    gen_optimizer.apply_gradients(grads_and_vars)
+    disc_optimizer.apply_gradients(disc_grads_and_vars)
+    gen_optimizer.apply_gradients(gen_grads_and_vars)
 
     # apply the adjustment
-    disc_adj_gv = tf.nest.map_structure(lambda x,v: (x,v), control_input_disc, 
+    disc_adj_gv = tf.nest.map_structure(lambda x,v: (-1.0*x,v), control_input_disc, 
                                         discriminator.weights)
-    gen_adj_gv = tf.nest.map_structure(lambda x,v: (x,v), control_input_gen,
+    gen_adj_gv = tf.nest.map_structure(lambda x,v: (-1.0*x,v), control_input_gen,
                                         generator.weights)
 
     disc_optimizer.apply_gradients(disc_adj_gv)
     gen_optimizer.apply_gradients(gen_adj_gv)
     num_examples += min_batch_size
-
-
-  disc_delta = tf.nest.map_structure(lambda a: a/num_examples_float, zero_disc)
-  gen_delta = tf.nest.map_structure(lambda a: a/num_examples_float, zero_gen)
 
   disc_delta = tf.nest.map_structure(tf.subtract, discriminator.weights,
                                         from_server.discriminator_weights)
@@ -202,8 +210,9 @@ def client_control(
     discriminator: tf.keras.Model,
     disc_optimizer: tf.keras.optimizers.Optimizer,
     gen_optimizer: tf.keras.optimizers.Optimizer,
-    zero_disc: tf.keras.Model.weights,
-    zero_gen: tf.keras.Model.weights) -> ClientOutput:
+    zero_disc: tf.keras.Model,
+    zero_gen: tf.keras.Model,
+    tau: float) -> ClientOutput:
   """The computation to run on the client, training the discriminator.
 
   Args:
@@ -222,9 +231,15 @@ def client_control(
                         from_server.generator_weights)
   tf.nest.map_structure(lambda a, b: a.assign(b), discriminator.weights,
                         from_server.discriminator_weights)
+  tf.nest.map_structure(lambda a, b: a.assign(b), zero_gen.weights,
+                        from_server.generator_weights)
+  tf.nest.map_structure(lambda a, b: a.assign(b), zero_disc.weights,
+                        from_server.discriminator_weights)
   num_examples = tf.constant(0)
+  meta_gen = from_server.meta_gen
+  meta_disc = from_server.meta_disc
   gen_inputs_and_real_data = tf.data.Dataset.zip((gen_inputs_ds, real_data_ds))
-  
+  loss_fns = gan_losses.WassersteinGanLossFns()
   for gen_inputs, real_data in gen_inputs_and_real_data:
     # It's possible that real_data and gen_inputs have different batch sizes.
     # For calculating the discriminator loss, it's desirable to have equal-sized
@@ -236,40 +251,51 @@ def client_control(
     real_data = real_data[0:min_batch_size]
     gen_inputs = gen_inputs[0:min_batch_size]
     # reset the gen/discriminator values so there's no moving
-    tf.nest.map_structure(lambda a, b: a.assign(b), generator.weights,
-                        from_server.generator_weights)
-    tf.nest.map_structure(lambda a, b: a.assign(b), discriminator.weights,
-                          from_server.discriminator_weights)
-    with tf.GradientTape() as tape:
+    #tf.nest.map_structure(lambda a, b: a.assign(b), generator.weights,
+                        #from_server.generator_weights)
+    #tf.nest.map_structure(lambda a, b: a.assign(b), discriminator.weights,
+                          #from_server.discriminator_weights)
+    with tf.GradientTape() as tape_gen:
       gen_loss = loss_fns.generator_loss(generator, discriminator, gen_inputs)
+      for i in range(len(generator.weights)):
+        gen_loss += tau*tf.nn.l2_loss(generator.weights[i] - meta_gen[i])
+    with tf.GradientTape() as tape_disc:
       disc_loss = loss_fns.discriminator_loss(generator, discriminator, gen_inputs, 
-                                            real_data)  
+                                            real_data)     
+      for i in range(len(discriminator.weights)):
+        disc_loss += tau*tf.nn.l2_loss(discriminator.weights[i] - meta_disc[i])
     # get disc grads
-    disc_grads = tape.gradient(disc_loss, discriminator.weights)
+    disc_grads = tape_disc.gradient(disc_loss, discriminator.weights)
     disc_grads_and_vars = zip(disc_grads, discriminator.weights)
 
     # get gen grads
-    gen_grads = tape.gradient(gen_loss, generator.weights)
+    gen_grads = tape_gen.gradient(gen_loss, generator.weights)
     gen_grads_and_vars = zip(gen_grads, generator.weights)
     
+    disc_grads_and_vars = tf.nest.map_structure(lambda x,v: (x,v), disc_grads, 
+                                        zero_disc.weights)
+    gen_grads_and_vars = tf.nest.map_structure(lambda x,v: (x,v), gen_grads,
+                                        zero_gen.weights)
     #apply the gradients
-    disc_optimizer.apply_gradients(grads_and_vars)
-    gen_optimizer.apply_gradients(grads_and_vars)
+    disc_optimizer.apply_gradients(disc_grads_and_vars)
+    gen_optimizer.apply_gradients(gen_grads_and_vars)
 
     #find the deltas
-    disc_delta = tf.nest.map_structure(tf.subtract, discriminator.weights,
-                                        from_server.discriminator_weights)
+    #disc_delta = tf.nest.map_structure(tf.subtract, discriminator.weights,
+                                        #from_server.discriminator_weights)
 
-    gen_delta = tf.nest.map_structure(tf.subtract, generator.weights,
-                                        from_server.generator_weights)
+    #gen_delta = tf.nest.map_structure(tf.subtract, generator.weights,
+                                        #from_server.generator_weights)
     # add to buffers
-    zero_disc = tf.nest.map_structure(lambda a, b: a + b, zero_disc, disc_delta)
-    zero_gen = tf.nest.map_structure(lambda a, b: a + b, zero_gen, gen_delta)
+    #zero_disc = tf.nest.map_structure(lambda a, b: a + b, zero_disc, disc_delta)
+    #zero_gen = tf.nest.map_structure(lambda a, b: a + b, zero_gen, gen_delta)
 
     num_examples += min_batch_size
   num_examples_float = tf.cast(num_examples, tf.float32)
-  disc_delta = tf.nest.map_structure(lambda a: a/num_examples_float, zero_disc)
-  gen_delta = tf.nest.map_structure(lambda a: a/num_examples_float, zero_gen)
+  disc_delta = tf.nest.map_structure(lambda a, b: (a-b)/num_examples_float, zero_disc.weights, 
+                  from_server.discriminator_weights)
+  gen_delta = tf.nest.map_structure(lambda a,b: (a-b)/num_examples_float, zero_gen.weights,
+                  from_server.generator_weights)
 
   disc_delta, disc_has_non_finite_delta = (
       tensor_utils.zero_all_if_any_non_finite(disc_delta))
@@ -297,6 +323,8 @@ def server_initial_state(generator, discriminator):
   return ServerState(
       generator_weights=_weights(generator),
       discriminator_weights=_weights(discriminator),
+      meta_gen=_weights(generator),
+      meta_disc=_weights(discriminator),
       counters={
           'num_rounds': tf.constant(0),
           'num_generator_train_examples': tf.constant(0),
@@ -310,7 +338,11 @@ def server_computation(
     # Tensor/Dataset arguments that will be supplied by TFF:
     server_state: ServerState,
     gen_delta: tf.keras.Model.weights,
-    disc_delta: tf.keras.Model.weights) -> ServerState:
+    disc_delta: tf.keras.Model.weights,
+    generator: tf.keras.Model,
+    discriminator: tf.keras.Model,
+    gen_optimizer: tf.keras.optimizers.Optimizer,
+    disc_optimizer: tf.keras.optimizers.Optimizer) -> ServerState:
   """The computation to run on the server, training the generator.
 
   Args:
@@ -337,24 +369,26 @@ def server_computation(
                         server_state.generator_weights)
   tf.nest.map_structure(lambda a, b: a.assign(b), discriminator.weights,
                         server_state.discriminator_weights)
-  server_gen_update_optimizer = tf.keras.optimizers.SGD(learning_rate=1)
-  server_disc_update_optimizer = tf.keras.optimizers.SGD(learning_rate=1)
   tf.nest.assert_same_structure(disc_delta, discriminator.weights)
   grads_and_vars_disc = tf.nest.map_structure(lambda x, v: (-1.0 * x, v), disc_delta,
                                          discriminator.weights)
   grads_and_vars_gen = tf.nest.map_structure(lambda x, v: (-1.0 * x, v), gen_delta,
                                          generator.weights)
-  server_disc_update_optimizer.apply_gradients(
+  disc_optimizer.apply_gradients(
       grads_and_vars_disc, name='server_update_disc')
-  server_gen_update_optimizer.apply_gradients(
+  gen_optimizer.apply_gradients(
       grads_and_vars_gen, name='server_update_gen'
   )
 
-  for k, v in client_output.counters.items():
-    server_state.counters[k] += v
-
   gen_examples_this_round = tf.constant(0)
-
+  
+  numrounds = server_state.counters['num_rounds']
+  round_mod = tf.math.floormod(numrounds, 2, name=None)
+  server_state.meta_gen = tf.cond(tf.math.equal(round_mod,0), lambda: generator.weights, 
+          lambda: server_state.generator_weights)
+  server_state.meta_disc = tf.cond(tf.math.equal(round_mod,0), lambda: discriminator.weights, 
+          lambda: server_state.discriminator_weights)
+  
   server_state.counters[
       'num_generator_train_examples'] += gen_examples_this_round
   server_state.generator_weights = _weights(generator)

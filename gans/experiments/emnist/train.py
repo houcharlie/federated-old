@@ -40,11 +40,12 @@ from gans.experiments.emnist.models import convolutional_gan_networks as network
 from gans.experiments.emnist.preprocessing import filtered_emnist_data_utils as fedu
 from utils import utils_impl
 from tensorboard.plugins.hparams import api as hp
+tf.random.set_seed(1234)
 
 with utils_impl.record_new_flags() as hparam_flags:
   # Metadata.
   flags.DEFINE_string(
-      'exp_name', 'test', 'Unique name for the experiment, suitable for use in '
+      'exp_name', 'test_adam', 'Unique name for the experiment, suitable for use in '
       'filenames.')
   flags.DEFINE_string('root_output_dir', '/ocean/projects/iri180031p/houc',
                       'Base directory to write experimental output.')
@@ -91,7 +92,7 @@ with utils_impl.record_new_flags() as hparam_flags:
 
   # Training hyperparameters.
   flags.DEFINE_integer(
-      'num_client_disc_train_steps', 1,
+      'num_client_disc_train_steps', 6,
       'The (max) number of optimization steps to take on each client when '
       'training the discriminator.')
   flags.DEFINE_integer(
@@ -101,9 +102,9 @@ with utils_impl.record_new_flags() as hparam_flags:
   flags.DEFINE_integer(
       'server_train_batch_size', 32,
       'Batch size to use on the server when training the generator.')
-  flags.DEFINE_integer('num_clients_per_round', 1,
+  flags.DEFINE_integer('num_clients_per_round', 10,
                        'The number of clients in each federated round.')
-  flags.DEFINE_integer('num_rounds', 1, 'The total number of federated rounds.')
+  flags.DEFINE_integer('num_rounds', 500, 'The total number of federated rounds.')
   flags.DEFINE_boolean(
       'use_dp', False,
       'If True, apply trusted aggregator user-level differential privacy. The '
@@ -111,10 +112,20 @@ with utils_impl.record_new_flags() as hparam_flags:
       'used, specifically the Gaussian average query. The next two flags set '
       'the specific hyperparameters of the Gaussian average query. If False, '
       'no differential privacy is applied (no clipping or noising).')
+  flags.DEFINE_integer(
+      'control', 0,
+      'Whether to use control variates.')
   flags.DEFINE_float(
       'dp_l2_norm_clip', 1e10,
       'If use_dp is True, the amount the discriminator weights delta vectors '
       'from the clients are clipped.')
+  flags.DEFINE_float(
+      'tau', 0,
+      'The amount of catalyst regularization to add.')
+  flags.DEFINE_float(
+      'lr_factor', 1,
+      'Learning rate factor'
+  )
   flags.DEFINE_float(
       'dp_noise_multiplier', 0.0,
       'If use_dp is True, Gaussian noise will be added to the sum of the '
@@ -132,14 +143,14 @@ with utils_impl.record_new_flags() as hparam_flags:
 
   # Controls output data frequency.
   flags.DEFINE_integer(
-      'num_rounds_per_eval', 1,
+      'num_rounds_per_eval', 10,
       'The number of federated rounds to go between running evaluation.')
   flags.DEFINE_integer(
-      'num_rounds_per_checkpoint', 5,
+      'num_rounds_per_checkpoint', 10,
       'The number of federated rounds to go between saving a checkpoint (to be '
       'used later if a restart were necessary).')
   flags.DEFINE_integer(
-      'num_rounds_per_save_images', 1,
+      'num_rounds_per_save_images', 10,
       'The number of federated rounds to go between saving examples of '
       'generated images.')
 
@@ -338,7 +349,7 @@ def _train(gan, server_gen_inputs_dataset, client_gen_inputs_dataset,
            client_real_images_tff_data, client_disc_train_steps,
            server_gen_train_steps, clients_per_round, total_rounds,
            rounds_per_eval, eval_hook_fn, rounds_per_checkpoint, output_dir,
-           exp_name):
+           exp_name, control, tau, gen_optimizer_fn, disc_optimizer_fn):
   """Trains the federated GAN."""
   server_gen_inputs_iterator = iter(
       server_gen_inputs_dataset.window(server_gen_train_steps))
@@ -364,15 +375,19 @@ def _train(gan, server_gen_inputs_dataset, client_gen_inputs_dataset,
     return datasets
 
   return training_loops.federated_training_loop(
-      gan,
-      server_gen_inputs_fn=server_gen_inputs_fn,
-      client_datasets_fn=client_datasets_fn,
-      total_rounds=total_rounds,
-      rounds_per_eval=rounds_per_eval,
-      eval_hook=eval_hook_fn,
-      rounds_per_checkpoint=rounds_per_checkpoint,
-      root_checkpoint_dir=os.path.join(output_dir,
-                                       'checkpoints/{}'.format(exp_name)))
+        gan,
+        server_gen_inputs_fn=server_gen_inputs_fn,
+        client_datasets_fn=client_datasets_fn,
+        total_rounds=total_rounds,
+        rounds_per_eval=rounds_per_eval,
+        eval_hook=eval_hook_fn,
+        rounds_per_checkpoint=rounds_per_checkpoint,
+        root_checkpoint_dir=os.path.join(output_dir,
+                                        'checkpoints/{}'.format(exp_name)),
+        control=control,
+        tau=tau,
+        gen_optimizer_fn=gen_optimizer_fn,
+        disc_optimizer_fn=disc_optimizer_fn)
 
 
 def _get_path_to_output_image(root_output_dir, exp_name):
@@ -466,7 +481,7 @@ def main(argv):
       dp_l2_norm_clip=FLAGS.dp_l2_norm_clip,
       dp_noise_multiplier=FLAGS.dp_noise_multiplier,
       clients_per_round=FLAGS.num_clients_per_round)
-
+  control = FLAGS.control == 1
   # Training.
   _, tff_time = _train(
       gan,
@@ -481,7 +496,11 @@ def main(argv):
       eval_hook_fn,
       FLAGS.num_rounds_per_checkpoint,
       output_dir=FLAGS.root_output_dir,
-      exp_name=FLAGS.exp_name)
+      exp_name=FLAGS.exp_name,
+      control=control,
+      tau=FLAGS.tau,
+      gen_optimizer_fn=lambda: tf.keras.optimizers.Adam(lr=0.001*FLAGS.lr_factor, beta_1=0.5, beta_2=0.999),
+      disc_optimizer_fn=lambda: tf.keras.optimizers.Adam(lr=0.001*FLAGS.lr_factor, beta_1=0.5, beta_2=0.999))
   logging.info('Total training time was %4.3f seconds.', tff_time)
 
   print('\nTRAINING COMPLETE.')
