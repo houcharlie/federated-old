@@ -22,7 +22,7 @@ Communication-Efficient Learning of Deep Networks from Decentralized Data
 """
 
 import collections
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union, Tuple
 
 import attr
 import tensorflow as tf
@@ -34,6 +34,7 @@ from adaptive_lr_decay import callbacks
 ModelBuilder = Callable[[], tff.learning.Model]
 OptimizerBuilder = Callable[[float], tf.keras.optimizers.Optimizer]
 ClientWeightFn = Callable[[Any], float]
+Callback = Union[callbacks.ReduceLROnPlateau, callbacks.SwitchLR, callbacks.MultistageLR]
 
 
 def _initialize_optimizer_vars(model: tff.learning.Model,
@@ -67,10 +68,26 @@ class ServerState(object):
   client_lr_callback = attr.ib()
   server_lr_callback = attr.ib()
 
+@attr.s(eq=False, order=False, frozen=True)
+class ClientState(object):
+  """Structure for state on the server.
+
+  Attributes:
+    correction: The correction applied to client steps (control variate)
+  """
+  correction = attr.ib()
 
 @tf.function
+def update_callback(server_state, num_client_grads, client_monitor_value, server_monitor_value):
+  updated_client_lr_callback = server_state.client_lr_callback.update(
+      client_monitor_value, num_client_grads)
+  updated_server_lr_callback = server_state.server_lr_callback.update(
+      server_monitor_value, num_client_grads)
+  return updated_client_lr_callback, updated_server_lr_callback
+@tf.function
 def server_update(model, server_optimizer, server_state, aggregated_gradients,
-                  client_monitor_value, server_monitor_value):
+                  client_monitor_value, server_monitor_value, num_client_grads,
+                  updated_client_lr_callback, updated_server_lr_callback):
   """Updates `server_state` according to `weights_delta` and output metrics.
 
   The `model_weights` attribute of `server_state` is updated according to the
@@ -105,10 +122,10 @@ def server_update(model, server_optimizer, server_state, aggregated_gradients,
 
   server_optimizer.apply_gradients(grads_and_vars)
 
-  updated_client_lr_callback = server_state.client_lr_callback.update(
-      client_monitor_value)
-  updated_server_lr_callback = server_state.server_lr_callback.update(
-      server_monitor_value)
+  # updated_client_lr_callback = server_state.client_lr_callback.update(
+  #     client_monitor_value, num_client_grads)
+  # updated_server_lr_callback = server_state.server_lr_callback.update(
+  #     server_monitor_value, num_client_grads)
 
   # Create a new state based on the updated model.
   return tff.utils.update_state(
@@ -141,6 +158,7 @@ class ClientOutput(object):
   """
   accumulated_gradients = attr.ib()
   client_weight = attr.ib()
+  num_grads = attr.ib()
   initial_model_output = attr.ib()
   model_output = attr.ib()
   optimizer_output = attr.ib()
@@ -161,6 +179,7 @@ def client_update(model,
                   dataset,
                   initial_weights,
                   client_optimizer,
+                  correction,
                   client_weight_fn=None):
   """Updates the client model with local training.
 
@@ -182,14 +201,18 @@ def client_update(model,
   tff.utils.assign(model_weights, initial_weights)
 
   num_examples = tf.constant(0, dtype=tf.int32)
+  num_grads = tf.constant(0., dtype=tf.float32)
   grad_sums = tf.nest.map_structure(tf.zeros_like, model_weights.trainable)
   for batch in dataset:
     with tf.GradientTape() as tape:
       output = model.forward_pass(batch)
     grads = tape.gradient(output.loss, model_weights.trainable)
-    grads_and_vars = zip(grads, model_weights.trainable)
+    corrected_grads = tf.nest.map_structure(lambda a,b: a + b,
+                                            grads, correction)
+    grads_and_vars = zip(corrected_grads, model_weights.trainable)
     client_optimizer.apply_gradients(grads_and_vars)
     num_examples += tf.shape(output.predictions)[0]
+    num_grads += 1.
     grad_sums = tf.nest.map_structure(tf.add, grad_sums, grads)
 
   aggregated_outputs = model.report_local_outputs()
@@ -202,6 +225,7 @@ def client_update(model,
   return ClientOutput(
       accumulated_gradients=grad_sums,
       client_weight=client_weight,
+      num_grads=num_grads,
       initial_model_output=aggregated_outputs,
       model_output=aggregated_outputs,
       optimizer_output=collections.OrderedDict([('num_examples', num_examples)
@@ -210,8 +234,8 @@ def client_update(model,
 
 def build_server_init_fn(model_fn: ModelBuilder,
                          server_optimizer_fn: OptimizerBuilder,
-                         client_lr_callback: callbacks.ReduceLROnPlateau,
-                         server_lr_callback: callbacks.ReduceLROnPlateau):
+                         client_lr_callback: Callback,
+                         server_lr_callback: Callback):
   """Builds a `tff.tf_computation` that returns the initial `ServerState`.
 
   The attributes `ServerState.model` and `ServerState.optimizer_state` are
@@ -241,15 +265,36 @@ def build_server_init_fn(model_fn: ModelBuilder,
 
   return server_init_tf
 
+def build_client_init_fn(model_fn: ModelBuilder):
+  """Builds a `tff.tf_computation` that returns the initial `ClientState`.
+
+  The attribute `ClientState.correction` is initialized by ModelBuilder
+
+  Args:
+    model_fn: A no-arg function that returns a `tff.learning.Model`.
+
+  Returns:
+    A `tff.tf_computation` that returns initial `ClientState`.
+  """
+
+  @tff.tf_computation
+  def client_init_tf():
+    model = model_fn()
+    # the default value for the correction is zero.
+    return ClientState(
+        correction=tf.nest.map_structure(tf.zeros_like, _get_weights(model).trainable))
+
+  return client_init_tf
 
 def build_fed_avg_process(
     model_fn: ModelBuilder,
-    client_lr_callback: callbacks.ReduceLROnPlateau,
-    server_lr_callback: callbacks.ReduceLROnPlateau,
+    client_lr_callback: Callback,
+    server_lr_callback: Callback,
     client_optimizer_fn: OptimizerBuilder = tf.keras.optimizers.SGD,
     server_optimizer_fn: OptimizerBuilder = tf.keras.optimizers.SGD,
     client_weight_fn: Optional[ClientWeightFn] = None,
-) -> tff.templates.IterativeProcess:
+    control: bool = False
+):
   """Builds the TFF computations for FedAvg with learning rate decay.
 
   Args:
@@ -275,44 +320,59 @@ def build_fed_avg_process(
 
   server_init_tf = build_server_init_fn(model_fn, server_optimizer_fn,
                                         client_lr_callback, server_lr_callback)
+  client_init_tf = build_client_init_fn(model_fn)
 
   server_state_type = server_init_tf.type_signature.result
+  client_state_type = client_init_tf.type_signature.result
   model_weights_type = server_state_type.model
-
+  
   tf_dataset_type = tff.SequenceType(dummy_model.input_spec)
   model_input_type = tff.SequenceType(dummy_model.input_spec)
 
   client_lr_type = server_state_type.client_lr_callback.learning_rate
+  swapped_type = server_state_type.client_lr_callback.swapped
   client_monitor_value_type = server_state_type.client_lr_callback.best
   server_monitor_value_type = server_state_type.server_lr_callback.best
 
-  @tff.tf_computation(model_input_type, model_weights_type, client_lr_type)
-  def client_update_fn(tf_dataset, initial_model_weights, client_lr):
+  @tff.tf_computation(model_input_type, model_weights_type, client_lr_type, client_state_type)
+  def client_update_fn(tf_dataset, initial_model_weights, client_lr, client_state):
     client_optimizer = client_optimizer_fn(client_lr)
     initial_model_output = get_client_output(model_fn(), tf_dataset,
                                              initial_model_weights)
-    client_state = client_update(model_fn(), tf_dataset, initial_model_weights,
-                                 client_optimizer, client_weight_fn)
+    client_output = client_update(model_fn(), tf_dataset, initial_model_weights,
+                                 client_optimizer, client_state.correction, client_weight_fn)
     return tff.utils.update_state(
-        client_state, initial_model_output=initial_model_output)
+        client_output, initial_model_output=initial_model_output)
 
   @tff.tf_computation(server_state_type, model_weights_type.trainable,
-                      client_monitor_value_type, server_monitor_value_type)
+                      client_monitor_value_type, server_monitor_value_type,
+                      tf.float32)
   def server_update_fn(server_state, model_delta, client_monitor_value,
-                       server_monitor_value):
+                       server_monitor_value, num_client_grads):
     model = model_fn()
-    server_lr = server_state.server_lr_callback.learning_rate
+    updated_client_callback, updated_server_callback = update_callback(server_state, num_client_grads,
+                                                                       client_monitor_value, server_monitor_value)
+    server_lr = updated_server_callback.learning_rate
     server_optimizer = server_optimizer_fn(server_lr)
     # We initialize the server optimizer variables to avoid creating them
     # within the scope of the tf.function server_update.
     _initialize_optimizer_vars(model, server_optimizer)
     return server_update(model, server_optimizer, server_state, model_delta,
-                         client_monitor_value, server_monitor_value)
+                         client_monitor_value, server_monitor_value, num_client_grads,
+                         updated_client_callback, updated_server_callback)
+  client_output_type = client_update_fn.type_signature.result
 
+  @tff.tf_computation(model_weights_type.trainable, model_weights_type.trainable, swapped_type)
+  def choose_aggregation(aggregated_gradients_fedavg, aggregated_gradients_sgd, swapped):
+    tf.print('Swap status:', swapped)
+    return tf.cond(swapped,
+                    lambda: aggregated_gradients_sgd,
+                    lambda: aggregated_gradients_fedavg)
   @tff.federated_computation(
-      tff.type_at_server(server_state_type),
+      tff.type_at_server(server_state_type), 
+      tff.type_at_clients(client_state_type),
       tff.type_at_clients(tf_dataset_type))
-  def run_one_round(server_state, federated_dataset):
+  def run_one_round(server_state, client_state, federated_dataset):
     """Orchestration logic for one round of computation.
 
     Note that in addition to updating the server weights according to the client
@@ -329,17 +389,58 @@ def build_fed_avg_process(
       `tff.learning.Model.federated_output_computation` before and during local
       client training.
     """
+    # server_state, client_state = state
+    # #sampled_client_state = client_state
     client_model = tff.federated_broadcast(server_state.model)
     client_lr = tff.federated_broadcast(
         server_state.client_lr_callback.learning_rate)
 
     client_outputs = tff.federated_map(
-        client_update_fn, (federated_dataset, client_model, client_lr))
+        client_update_fn, (federated_dataset, client_model, client_lr, client_state))
 
     client_weight = client_outputs.client_weight
-    aggregated_gradients = tff.federated_mean(
-        client_outputs.accumulated_gradients, weight=client_weight)
+    num_client_grads = tff.federated_sum(client_outputs.num_grads)
+    aggregated_gradients_fedavg = tff.federated_mean(
+          client_outputs.accumulated_gradients, weight=client_weight)
+    aggregated_gradients_sgd = tff.federated_sum(
+          client_outputs.accumulated_gradients)
+    
+    # c is the minibatch gradient across all clients
+    @tff.tf_computation(model_weights_type.trainable, tf.float32)
+    def compute_c(aggregated_gradients_sgd, num_client_grads):
+      c = tf.nest.map_structure(lambda a: a/num_client_grads, aggregated_gradients_sgd)
+      return c
+    c = tff.federated_broadcast(tff.federated_map(compute_c, (aggregated_gradients_sgd, num_client_grads)))
+    # c_i is the minibatch gradient within one client
+    @tff.tf_computation(client_output_type.accumulated_gradients, client_output_type.num_grads)
+    def compute_ci(accumulated_gradients, num_grads):
+      c_i = tf.nest.map_structure(lambda a: a/num_grads, accumulated_gradients)
+      return c_i
+    c_i = tff.federated_map(compute_ci, (client_outputs.accumulated_gradients, client_outputs.num_grads))
 
+
+    @tff.tf_computation(client_output_type.accumulated_gradients, client_output_type.accumulated_gradients)
+    def compute_control_input(c, c_i):
+      correction = tf.nest.map_structure(lambda a, b: a - b, c, c_i)
+      # if we are using SCAFFOLD then use the correction, otherwise 
+      # we just let the correction be zero.
+      return tf.cond(tf.constant(control, dtype=tf.bool), 
+          lambda: correction, 
+          lambda: tf.nest.map_structure(tf.zeros_like, correction))
+    
+    corrections = tff.federated_map(compute_control_input, (c, c_i))
+    @tff.tf_computation(client_state_type, client_output_type.accumulated_gradients)
+    def update_client_state(client_state, corrections):
+      return tff.utils.update_state(
+                    client_state,
+                    correction=corrections)
+    client_state = tff.federated_map(update_client_state, (client_state, corrections))
+
+    aggregated_gradients = tff.federated_map(choose_aggregation, 
+                                             (aggregated_gradients_fedavg, 
+                                              aggregated_gradients_sgd,
+                                              server_state.server_lr_callback.swapped)
+                                            )
     initial_aggregated_outputs = dummy_model.federated_output_computation(
         client_outputs.initial_model_output)
     if isinstance(initial_aggregated_outputs.type_signature, tff.StructType):
@@ -354,17 +455,20 @@ def build_fed_avg_process(
 
     server_state = tff.federated_map(
         server_update_fn, (server_state, aggregated_gradients,
-                           client_monitor_value, server_monitor_value))
+                           client_monitor_value, server_monitor_value,
+                           num_client_grads))
 
     result = collections.OrderedDict(
         before_training=initial_aggregated_outputs,
         during_training=aggregated_outputs)
 
-    return server_state, result
+    return server_state, client_state, result
 
   @tff.federated_computation
   def initialize_fn():
-    return tff.federated_value(server_init_tf(), tff.SERVER)
+    server_state = tff.federated_value(server_init_tf(), tff.SERVER)
+    #client_state = tff.federated_value(client_init_tf(), tff.CLIENTS)
+    return server_state
 
   iterative_process = tff.templates.IterativeProcess(
       initialize_fn=initialize_fn, next_fn=run_one_round)
@@ -372,6 +476,9 @@ def build_fed_avg_process(
   @tff.tf_computation(server_state_type)
   def get_model_weights(server_state):
     return server_state.model
-
+  @tff.tf_computation
+  def client_init():
+    return client_init_tf()
   iterative_process.get_model_weights = get_model_weights
+  iterative_process.client_init = client_init
   return iterative_process

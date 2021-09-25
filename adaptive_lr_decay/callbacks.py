@@ -131,6 +131,58 @@ class ReduceLROnPlateau(object):
       return False
 
 
+@attr.s(eq=False)
+class SwitchLR(object):
+  """A callback for switching the learning rate after some number of rounds
+
+  Attributes:
+    learning_rate: The current learning rate.
+    round_num: The round number.
+    monitor: left in to adhere to codebase
+    decay factor: factor by which the learning rate is decreased
+    best: placeholder to adhere to codebase
+    switch_round: The number of rounds that must occur before reducing the learning
+      rate. 
+  """
+  owner = attr.ib()
+  start_lr = attr.ib()
+  learning_rate = attr.ib()
+  round_num = attr.ib(default=0)
+  monitor = attr.ib(default='loss')
+  decay_factor = attr.ib(default=0.1)
+  best = attr.ib(default=1.0)
+  switch_round = attr.ib(default=None)
+  swapped = attr.ib(default=False)
+
+  def update(self, round_metric, num_client_grads):
+    """Just decreases the learning rate if the round_num > switch_round."""
+    learning_rate = self.learning_rate
+    start_lr = self.start_lr
+    prev_round_num = self.round_num
+    switch_round = self.switch_round
+    decay_factor = self.decay_factor
+    owner = self.owner
+    swapped = self.swapped
+    round_num = prev_round_num + 1
+    if prev_round_num >= switch_round:
+      swapped = True
+    if swapped:
+      learning_rate = start_lr * self.decay_factor/num_client_grads
+    tf.print('prev_round_num', prev_round_num)
+    tf.print(owner, learning_rate)
+    tf.print('Swapped', swapped)
+    tf.print(owner, learning_rate)
+    tf.print('Switch round', switch_round)
+    tf.print('Total client grads', num_client_grads)
+
+
+    # Return an updated callback
+    return tff.utils.update_state(
+        self,
+        learning_rate=learning_rate,
+        round_num=round_num,
+        swapped=swapped)
+
 def create_reduce_lr_on_plateau(**kwargs):
   """Initializes a callback in a way that automatically infers attributes."""
   callback = ReduceLROnPlateau(**kwargs)
@@ -165,5 +217,104 @@ def create_reduce_lr_on_plateau(**kwargs):
 
   if callback.cooldown_counter is None:
     callback.cooldown_counter = callback.cooldown
+
+  return callback
+
+def create_switch_lr(**kwargs):
+  """Initializes a callback in a way that automatically infers attributes."""
+  callback = SwitchLR(**kwargs)
+  if callback.decay_factor > 1.0 or callback.decay_factor < 0:
+    raise ValueError('Decay factor must be in the range [0, 1].')
+
+  if callback.best is None:
+    callback.best = np.Inf if callback.minimize else 0.0
+
+  if callback.switch_round < 0:
+    raise ValueError('Cannot be negative round switch')
+
+  return callback
+
+@attr.s(eq=False)
+class MultistageLR(object):
+  """A callback for gradually switching the LR
+
+  Attributes:
+    learning_rate: The current learning rate.
+    round_num: The round number.
+    monitor: left in to adhere to codebase
+    decay factor: factor by which the learning rate is decreased
+    best: placeholder to adhere to codebase
+    switch_round: The number of rounds that must occur before reducing the learning
+      rate. 
+  """
+  owner = attr.ib()
+  start_lr = attr.ib()
+  learning_rate = attr.ib()
+  s = attr.ib()
+  total_rounds = attr.ib()
+  rounds_in_stage = attr.ib()
+  sampled_clients = attr.ib()
+  round_num = attr.ib(default=0)
+  monitor = attr.ib(default='loss')
+  best = attr.ib(default=1.0)
+  switch_round = attr.ib(default=None)
+  swapped = attr.ib(default=False)
+  allow_swap = attr.ib(default=True)
+  
+
+  def update(self, round_metric, num_client_grads):
+    """Just decreases the learning rate if the round_num > switch_round."""
+    learning_rate = self.learning_rate
+    start_lr = self.start_lr
+    prev_round_num = self.round_num
+    switch_round = self.switch_round
+    owner = self.owner
+    swapped = self.swapped
+    s = self.s
+    sampled_clients = self.sampled_clients
+    curr_stage_length = switch_round * 2. ** s
+    rounds_in_stage = self.rounds_in_stage
+    round_num = prev_round_num + 1
+    if rounds_in_stage > int(curr_stage_length):
+      s += 1.
+      rounds_in_stage = 0
+    else:
+      rounds_in_stage += 1
+
+    if 2. ** (-s) < (1. / num_client_grads) * float(sampled_clients) and self.allow_swap:
+      swapped = True
+    if swapped:
+      if owner == 'Client':
+        learning_rate = 0.
+      elif owner == 'Server':
+        learning_rate = start_lr * 2. ** (-s) / num_client_grads
+    else:
+      learning_rate = start_lr * 2. ** (-s)
+
+    tf.print('Stage', s)
+    tf.print('Swapped', swapped)
+    tf.print(owner, learning_rate)
+    tf.print('Switch round', switch_round)
+    tf.print('Total client grads', num_client_grads)
+
+
+    # Return an updated callback
+    return tff.utils.update_state(
+        self,
+        learning_rate=learning_rate,
+        round_num=round_num,
+        swapped=swapped,
+        rounds_in_stage=rounds_in_stage,
+        s=s)
+
+def create_multistage_lr(**kwargs):
+  """Initializes a callback in a way that automatically infers attributes."""
+  callback = MultistageLR(**kwargs)
+
+  if callback.best is None:
+    callback.best = np.Inf if callback.minimize else 0.0
+
+  if callback.switch_round < 0:
+    raise ValueError('Cannot be negative round switch')
 
   return callback

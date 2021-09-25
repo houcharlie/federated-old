@@ -24,7 +24,7 @@ from typing import Callable
 from absl import app
 from absl import flags
 import tensorflow_federated as tff
-
+import math
 from adaptive_lr_decay import adaptive_fed_avg
 from adaptive_lr_decay import callbacks
 from optimization.cifar100 import federated_cifar100
@@ -42,7 +42,6 @@ _SUPPORTED_TASKS = [
     'cifar100', 'emnist_cr', 'emnist_ae', 'shakespeare', 'stackoverflow_nwp',
     'stackoverflow_lr'
 ]
-
 with utils_impl.record_hparam_flags() as optimizer_flags:
   optimizer_utils.define_optimizer_flags('client')
   optimizer_utils.define_optimizer_flags('server')
@@ -57,9 +56,19 @@ with utils_impl.record_hparam_flags() as callback_flags:
   flags.DEFINE_float(
       'min_delta', 1e-4, 'Minimum delta for improvement in the learning rate '
       'callbacks.')
+  flags.DEFINE_float(
+      'switch_round', 0.1, 'Number of rounds before switching to minibatching ')
   flags.DEFINE_integer(
       'window_size', 100, 'Number of rounds to take a moving average over when '
       'estimating the training loss in learning rate callbacks.')
+  flags.DEFINE_integer(
+      'swapped', 0, 'Whether to start as minibatch ')
+  flags.DEFINE_integer(
+      'allow_swap', 1, 'Whether to swap in multistage ')
+  flags.DEFINE_integer(
+      'control', 0, 'Whether to use a control variate ')
+  flags.DEFINE_integer(
+      'multistage', 0, 'Whether to use multistage ')
   flags.DEFINE_integer(
       'patience', 100, 'Number of rounds of non-improvement before decaying the'
       'learning rate.')
@@ -67,7 +76,7 @@ with utils_impl.record_hparam_flags() as callback_flags:
 
 with utils_impl.record_hparam_flags() as shared_flags:
   # Federated training hyperparameters
-  flags.DEFINE_integer('client_epochs_per_round', -1,
+  flags.DEFINE_integer('client_epochs_per_round', 20,
                        'Number of epochs in the client to take per round.')
   flags.DEFINE_integer('client_batch_size', 20, 'Batch size on the clients.')
   flags.DEFINE_integer('clients_per_round', 10,
@@ -80,7 +89,7 @@ with utils_impl.record_hparam_flags() as shared_flags:
   flags.DEFINE_string(
       'experiment_name', None, 'The name of this experiment. Will be append to '
       '--root_output_dir to separate experiment results.')
-  flags.DEFINE_string('root_output_dir', '/tmp/adaptive_lr_decay/',
+  flags.DEFINE_string('root_output_dir', '/ocean/projects/iri180031p/houc/multistage/grid_out',
                       'Root directory for writing experiment output.')
   flags.DEFINE_integer(
       'rounds_per_eval', 1,
@@ -145,21 +154,75 @@ def main(argv):
   client_optimizer_fn = optimizer_utils.create_optimizer_fn_from_flags('client')
   server_optimizer_fn = optimizer_utils.create_optimizer_fn_from_flags('server')
 
-  client_lr_callback = callbacks.create_reduce_lr_on_plateau(
-      learning_rate=FLAGS.client_learning_rate,
-      decay_factor=FLAGS.client_decay_factor,
-      min_delta=FLAGS.min_delta,
-      min_lr=FLAGS.min_lr,
-      window_size=FLAGS.window_size,
-      patience=FLAGS.patience)
+  # client_lr_callback = callbacks.create_reduce_lr_on_plateau(
+  #     learning_rate=FLAGS.client_learning_rate,
+  #     decay_factor=FLAGS.client_decay_factor,
+  #     min_delta=FLAGS.min_delta,
+  #     min_lr=FLAGS.min_lr,
+  #     window_size=FLAGS.window_size,
+  #     patience=FLAGS.patience)
 
-  server_lr_callback = callbacks.create_reduce_lr_on_plateau(
-      learning_rate=FLAGS.server_learning_rate,
-      decay_factor=FLAGS.server_decay_factor,
-      min_delta=FLAGS.min_delta,
-      min_lr=FLAGS.min_lr,
-      window_size=FLAGS.window_size,
-      patience=FLAGS.patience)
+  # server_lr_callback = callbacks.create_reduce_lr_on_plateau(
+  #     learning_rate=FLAGS.server_learning_rate,
+  #     decay_factor=FLAGS.server_decay_factor,
+  #     min_delta=FLAGS.min_delta,
+  #     min_lr=FLAGS.min_lr,
+  #     window_size=FLAGS.window_size,
+  #     patience=FLAGS.patience)
+  #tff.backends.native.set_local_execution_context(FLAGS.clients_per_round)
+
+#   client_lr_callback = callbacks.create_switch_lr(
+#       owner='Client',
+#       learning_rate=FLAGS.client_learning_rate,
+#       start_lr=FLAGS.client_learning_rate,
+#       decay_factor=0.,
+#       switch_round=math.ceil(FLAGS.switch_round*FLAGS.total_rounds),
+#       swapped=bool(FLAGS.swapped))
+#   server_lr_callback = callbacks.create_switch_lr(
+#       owner='Server',
+#       learning_rate=FLAGS.server_learning_rate,
+#       start_lr=FLAGS.server_learning_rate,
+#       decay_factor=1.,
+#       switch_round=math.ceil(FLAGS.switch_round*FLAGS.total_rounds),
+#       swapped=bool(FLAGS.swapped))
+  if bool(FLAGS.multistage):
+    client_lr_callback = callbacks.create_multistage_lr(
+        owner='Client',
+        learning_rate=FLAGS.client_learning_rate,
+        start_lr=FLAGS.client_learning_rate,
+        s=0.,
+        total_rounds=FLAGS.total_rounds,
+        rounds_in_stage=0,
+        swapped=bool(FLAGS.swapped),
+        sampled_clients=FLAGS.clients_per_round,
+        switch_round=FLAGS.switch_round*FLAGS.total_rounds,
+        allow_swap=bool(FLAGS.allow_swap))
+    server_lr_callback = callbacks.create_multistage_lr(
+        owner='Server',
+        learning_rate=FLAGS.server_learning_rate,
+        start_lr=FLAGS.client_learning_rate,
+        s=0.,
+        total_rounds=FLAGS.total_rounds,
+        rounds_in_stage=0,
+        swapped=bool(FLAGS.swapped),
+        sampled_clients=FLAGS.clients_per_round,
+        switch_round=FLAGS.switch_round*FLAGS.total_rounds,
+        allow_swap=bool(FLAGS.allow_swap))
+  else:
+    client_lr_callback = callbacks.create_switch_lr(
+        owner='Client',
+        learning_rate=FLAGS.client_learning_rate,
+        start_lr=FLAGS.client_learning_rate,
+        decay_factor=0.,
+        switch_round=math.ceil(FLAGS.switch_round*FLAGS.total_rounds),
+        swapped=bool(FLAGS.swapped))
+    server_lr_callback = callbacks.create_switch_lr(
+        owner='Server',
+        learning_rate=FLAGS.server_learning_rate,
+        start_lr=FLAGS.server_learning_rate,
+        decay_factor=1.,
+        switch_round=math.ceil(FLAGS.switch_round*FLAGS.total_rounds),
+        swapped=bool(FLAGS.swapped))
 
   def iterative_process_builder(
       model_fn: Callable[[], tff.learning.Model],
@@ -178,7 +241,8 @@ def main(argv):
         client_lr_callback,
         server_lr_callback,
         client_optimizer_fn=client_optimizer_fn,
-        server_optimizer_fn=server_optimizer_fn)
+        server_optimizer_fn=server_optimizer_fn,
+        control=bool(FLAGS.control))
 
   task_spec = training_specs.TaskSpec(
       iterative_process_builder=iterative_process_builder,
@@ -220,8 +284,10 @@ def main(argv):
 
   training_loop.run(
       iterative_process=runner_spec.iterative_process,
+      client_ids=runner_spec.client_ids,
       client_datasets_fn=runner_spec.client_datasets_fn,
       validation_fn=runner_spec.validation_fn,
+      train_eval_fn=runner_spec.train_eval_fn,
       test_fn=runner_spec.test_fn,
       total_rounds=FLAGS.total_rounds,
       experiment_name=FLAGS.experiment_name,
