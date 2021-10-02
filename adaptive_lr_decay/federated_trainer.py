@@ -83,16 +83,16 @@ with utils_impl.record_hparam_flags() as shared_flags:
                        'How many clients to sample per round.')
   flags.DEFINE_integer('client_datasets_random_seed', 1,
                        'Random seed for client sampling.')
-  flags.DEFINE_integer('total_rounds', 200, 'Number of total training rounds.')
+  flags.DEFINE_integer('total_rounds', 500, 'Number of total training rounds.')
 
   # Training loop configuration
   flags.DEFINE_string(
       'experiment_name', None, 'The name of this experiment. Will be append to '
       '--root_output_dir to separate experiment results.')
-  flags.DEFINE_string('root_output_dir', '/ocean/projects/iri180031p/houc/multistage/grid_out',
+  flags.DEFINE_string('root_output_dir', '/ocean/projects/iri180031p/houc/multistage/CIFAR-5core-longexp',
                       'Root directory for writing experiment output.')
   flags.DEFINE_integer(
-      'rounds_per_eval', 1,
+      'rounds_per_eval', 10,
       'How often to evaluate the global model on the validation dataset.')
   flags.DEFINE_integer('rounds_per_checkpoint', 50,
                        'How often to checkpoint the global model.')
@@ -185,12 +185,13 @@ def main(argv):
 #       decay_factor=1.,
 #       switch_round=math.ceil(FLAGS.switch_round*FLAGS.total_rounds),
 #       swapped=bool(FLAGS.swapped))
-  if bool(FLAGS.multistage):
+  if FLAGS.multistage == 1:
     client_lr_callback = callbacks.create_multistage_lr(
         owner='Client',
         learning_rate=FLAGS.client_learning_rate,
         start_lr=FLAGS.client_learning_rate,
         s=0.,
+        decay_factor=0.,
         total_rounds=FLAGS.total_rounds,
         rounds_in_stage=0,
         swapped=bool(FLAGS.swapped),
@@ -202,13 +203,14 @@ def main(argv):
         learning_rate=FLAGS.server_learning_rate,
         start_lr=FLAGS.client_learning_rate,
         s=0.,
+        decay_factor=1.,
         total_rounds=FLAGS.total_rounds,
         rounds_in_stage=0,
         swapped=bool(FLAGS.swapped),
         sampled_clients=FLAGS.clients_per_round,
         switch_round=FLAGS.switch_round*FLAGS.total_rounds,
         allow_swap=bool(FLAGS.allow_swap))
-  else:
+  elif FLAGS.multistage == 0:
     client_lr_callback = callbacks.create_switch_lr(
         owner='Client',
         learning_rate=FLAGS.client_learning_rate,
@@ -223,6 +225,31 @@ def main(argv):
         decay_factor=1.,
         switch_round=math.ceil(FLAGS.switch_round*FLAGS.total_rounds),
         swapped=bool(FLAGS.swapped))
+  elif FLAGS.multistage == 2:
+    client_lr_callback = callbacks.create_constantstage_lr(
+        owner='Client',
+        learning_rate=FLAGS.client_learning_rate,
+        start_lr=FLAGS.client_learning_rate,
+        s=0.,
+        decay_factor=0.,
+        total_rounds=FLAGS.total_rounds,
+        rounds_in_stage=0,
+        swapped=bool(FLAGS.swapped),
+        sampled_clients=FLAGS.clients_per_round,
+        switch_round=FLAGS.switch_round*FLAGS.total_rounds,
+        allow_swap=bool(FLAGS.allow_swap))
+    server_lr_callback = callbacks.create_constantstage_lr(
+        owner='Server',
+        learning_rate=FLAGS.server_learning_rate,
+        start_lr=FLAGS.client_learning_rate,
+        s=0.,
+        decay_factor=1.,
+        total_rounds=FLAGS.total_rounds,
+        rounds_in_stage=0,
+        swapped=bool(FLAGS.swapped),
+        sampled_clients=FLAGS.clients_per_round,
+        switch_round=FLAGS.switch_round*FLAGS.total_rounds,
+        allow_swap=bool(FLAGS.allow_swap))
 
   def iterative_process_builder(
       model_fn: Callable[[], tff.learning.Model],

@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 from absl import logging
 import tensorflow as tf
 import tensorflow_federated as tff
+import numpy as np
 
 
 class IterativeProcessCompatibilityError(TypeError):
@@ -83,8 +84,8 @@ def _write_metrics(metrics_mngr, tb_mngr, metrics, round_num):
   logging.info('Metrics at round {:d}:\n{!s}'.format(round_num,
                                                      pprint.pformat(metrics)))
 
-  metrics_mngr.save_metrics(round_num, metrics)
-  tb_mngr.save_metrics(round_num, metrics)
+  metrics_mngr.save_metrics(metrics, round_num)
+  tb_mngr.save_metrics(metrics, round_num)
 
 
 def _compute_numpy_l2_difference(model, previous_model):
@@ -121,10 +122,19 @@ def _check_iterative_process_compatibility(iterative_process):
   # TODO(b/174268978): Once we enforce federated evaluations, we can check
   # compatibility with `validation_fn` without actually running the function.
 
+def save_singular_vals(root_output_dir, experiment_name, round_num, singular_vals):
+  s_numpy = singular_vals.numpy()
+  rootdir = os.path.join(root_output_dir, 'singular_values')
+  savepath = os.path.join(rootdir, f'{experiment_name}_{round_num}')
+  if not os.path.exists(savepath):
+    os.makedirs(rootdir)
+  np.save(savepath, s_numpy)
 
 def run(iterative_process: tff.templates.IterativeProcess,
+        client_ids: List[str],
         client_datasets_fn: Callable[[int], List[tf.data.Dataset]],
         validation_fn: Callable[[Any, int], Dict[str, float]],
+        train_eval_fn: Callable[[Any, int], Dict[str, float]],
         total_rounds: int,
         experiment_name: str,
         test_fn: Optional[Callable[[Any], Dict[str, float]]] = None,
@@ -172,7 +182,7 @@ def run(iterative_process: tff.templates.IterativeProcess,
   Returns:
     The final `state` of the iterative process after training.
   """
-  _check_iterative_process_compatibility(iterative_process)
+  #_check_iterative_process_compatibility(iterative_process)
   if not callable(client_datasets_fn):
     raise TypeError('client_datasets_fn should be callable.')
   if not callable(validation_fn):
@@ -181,24 +191,23 @@ def run(iterative_process: tff.templates.IterativeProcess,
     raise TypeError('test_fn should be callable.')
 
   logging.info('Starting iterative_process training loop...')
-  initial_state = iterative_process.initialize()
-
+  state = iterative_process.initialize()
   checkpoint_mngr, metrics_mngr, tb_mngr, profiler = _setup_outputs(
       root_output_dir, experiment_name, rounds_per_profile)
 
-  logging.info('Asking checkpoint manager to load checkpoint.')
-  state, round_num = checkpoint_mngr.load_latest_checkpoint(initial_state)
-
-  if state is None:
-    logging.info('Initializing experiment from scratch.')
-    state = initial_state
-    round_num = 0
-  else:
-    logging.info('Restarted from checkpoint round %d', round_num)
-    round_num += 1  # Increment to avoid overwriting current checkpoint
+  #logging.info('Asking checkpoint manager to load checkpoint.')
+  #state, round_num = checkpoint_mngr.load_latest_checkpoint(initial_state)
+  round_num = 0
+  # if state is None:
+  #   logging.info('Initializing experiment from scratch.')
+  #   state = initial_state
+  #   
+  # else:
+  #   logging.info('Restarted from checkpoint round %d', round_num)
+  #   round_num += 1  # Increment to avoid overwriting current checkpoint
   metrics_mngr.clear_metrics(round_num)
-
   current_model = iterative_process.get_model_weights(state)
+  client_state = {x: iterative_process.client_init() for x in client_ids}
 
   loop_start_time = time.time()
   loop_start_round = round_num
@@ -217,14 +226,21 @@ def run(iterative_process: tff.templates.IterativeProcess,
     # determined (and possibly fixed).
     try:
       with profiler(round_num):
-        state, round_metrics = iterative_process.next(state,
+        sampled_client_states = [client_state[x] for x in federated_train_data]
+        state, returned_client_states, round_metrics = iterative_process.next(state,
+                                                      sampled_client_states,
                                                       federated_train_data)
+        client_num = 0
+        for client in federated_train_data:
+          client_state[client] = returned_client_states[client_num]
+          client_num += 1
+        assert client_num == len(federated_train_data)
     except (tf.errors.FailedPreconditionError, tf.errors.NotFoundError,
             tf.errors.InternalError) as e:
       logging.warning('Caught %s exception while running round %d:\n\t%s',
                       type(e), round_num, e)
       continue  # restart the loop without incrementing the round number
-
+    
     current_model = iterative_process.get_model_weights(state)
     train_metrics['training_secs'] = time.time() - training_start_time
     train_metrics['model_delta_l2_norm'] = _compute_numpy_l2_difference(
@@ -251,6 +267,11 @@ def run(iterative_process: tff.templates.IterativeProcess,
       validation_metrics = validation_fn(current_model, round_num)
       validation_metrics['evaluate_secs'] = time.time() - evaluate_start_time
       metrics['eval'] = validation_metrics
+      train_eval_metrics = train_eval_fn(current_model, round_num)
+      metrics['train_eval'] = train_eval_metrics
+      #print('Saving the singular values')
+      #save_singular_vals(root_output_dir, experiment_name, round_num, singular_vals)
+
 
     _write_metrics(metrics_mngr, tb_mngr, metrics, round_num)
     round_num += 1

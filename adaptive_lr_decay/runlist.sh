@@ -27,6 +27,7 @@ while read p; do
 #SBATCH -N 1
 #SBATCH -p GPU-shared
 #SBATCH --gpus=1
+#SBATCH -n 5
 #SBATCH -t 48:00:00
 #SBATCH --mem-per-gpu=64G
 #SBATCH -o $dir/output_$i.out

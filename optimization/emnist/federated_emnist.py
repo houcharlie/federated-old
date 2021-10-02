@@ -46,7 +46,7 @@ def configure_training(task_spec: training_specs.TaskSpec,
   """
   emnist_task = 'digit_recognition'
   emnist_train, _ = tff.simulation.datasets.emnist.load_data(only_digits=False)
-  _, emnist_test = emnist_dataset.get_centralized_datasets(
+  emnist_train_central, emnist_test = emnist_dataset.get_centralized_datasets(
       only_digits=False, emnist_task=emnist_task)
 
   train_preprocess_fn = emnist_dataset.create_preprocess_fn(
@@ -96,6 +96,7 @@ def configure_training(task_spec: training_specs.TaskSpec,
   client_sampling_fn = lambda x: list(client_ids_fn(x))
 
   training_process.get_model_weights = iterative_process.get_model_weights
+  training_process.client_init = iterative_process.client_init
 
   test_fn = training_utils.build_centralized_evaluate_fn(
       eval_dataset=emnist_test,
@@ -103,10 +104,18 @@ def configure_training(task_spec: training_specs.TaskSpec,
       loss_builder=loss_builder,
       metrics_builder=metrics_builder)
 
-  validation_fn = lambda model_weights, round_num: test_fn(model_weights)
+  train_fn = training_utils.build_centralized_evaluate_fn(
+      eval_dataset=emnist_train_central,
+      model_builder=model_builder,
+      loss_builder=loss_builder,
+      metrics_builder=metrics_builder)
 
+  validation_fn = lambda model_weights, round_num: test_fn(model_weights)
+  train_eval_fn = lambda model_weights, round_num: train_fn(model_weights)
   return training_specs.RunnerSpec(
       iterative_process=training_process,
       client_datasets_fn=client_sampling_fn,
+      client_ids = emnist_train.client_ids,
       validation_fn=validation_fn,
+      train_eval_fn=train_eval_fn,
       test_fn=test_fn)

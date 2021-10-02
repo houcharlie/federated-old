@@ -110,9 +110,13 @@ class RunnerSpec(object):
       training.
   """
   iterative_process: tff.templates.IterativeProcess = attr.ib()
+  client_ids: List[str] = attr.ib()
   client_datasets_fn: Callable[[int], List[tf.data.Dataset]] = attr.ib(
       validator=attr.validators.is_callable())
   validation_fn: ValidationFnType = attr.ib(
+      default=None,
+      validator=attr.validators.optional(attr.validators.is_callable()))
+  train_eval_fn: ValidationFnType = attr.ib(
       default=None,
       validator=attr.validators.optional(attr.validators.is_callable()))
   test_fn: TestFnType = attr.ib(

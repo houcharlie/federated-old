@@ -16,3 +16,6 @@ venv/
 
 # PyCharm
 .idea*
+adaptive_lr_decay/best_files.py
+*/runfiles/*
+*.png*

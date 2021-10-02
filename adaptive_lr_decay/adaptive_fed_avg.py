@@ -157,6 +157,7 @@ class ClientOutput(object):
       optimizer.
   """
   accumulated_gradients = attr.ib()
+  accumulated_gradients_nonupdate = attr.ib()
   client_weight = attr.ib()
   num_grads = attr.ib()
   initial_model_output = attr.ib()
@@ -203,6 +204,15 @@ def client_update(model,
   num_examples = tf.constant(0, dtype=tf.int32)
   num_grads = tf.constant(0., dtype=tf.float32)
   grad_sums = tf.nest.map_structure(tf.zeros_like, model_weights.trainable)
+  grad_sums_sgd = tf.nest.map_structure(tf.zeros_like, model_weights.trainable)
+  # compute the sgd update
+  # for batch in dataset:
+  #   with tf.GradientTape() as tape:
+  #     output = model.forward_pass(batch)
+  #   grads = tape.gradient(output.loss, model_weights.trainable)
+  #   grad_sums_sgd = tf.nest.map_structure(tf.add, grad_sums_sgd, grads)
+
+  # compute the fedavg updates
   for batch in dataset:
     with tf.GradientTape() as tape:
       output = model.forward_pass(batch)
@@ -224,6 +234,7 @@ def client_update(model,
 
   return ClientOutput(
       accumulated_gradients=grad_sums,
+      accumulated_gradients_nonupdate=grad_sums_sgd,
       client_weight=client_weight,
       num_grads=num_grads,
       initial_model_output=aggregated_outputs,
@@ -418,7 +429,6 @@ def build_fed_avg_process(
       return c_i
     c_i = tff.federated_map(compute_ci, (client_outputs.accumulated_gradients, client_outputs.num_grads))
 
-
     @tff.tf_computation(client_output_type.accumulated_gradients, client_output_type.accumulated_gradients)
     def compute_control_input(c, c_i):
       correction = tf.nest.map_structure(lambda a, b: a - b, c, c_i)
@@ -458,9 +468,102 @@ def build_fed_avg_process(
                            client_monitor_value, server_monitor_value,
                            num_client_grads))
 
+    @tff.tf_computation(model_weights_type.trainable)
+    def calculate_global_norm(model_update):
+      """Calculate the global norm across all layers of the model update."""
+      return tf.linalg.global_norm(tf.nest.flatten(model_update))
+
+    @tff.tf_computation(model_weights_type.trainable)
+    def normalize_vector(model_update):
+      update_norm = calculate_global_norm(model_update)
+      return tf.nest.map_structure(lambda a: a / update_norm, model_update)
+
+    @tff.tf_computation(model_weights_type.trainable)
+    def calculate_square_global_norm(model_update):
+      """Calculate the squared global norm across all layers of a model update."""
+      # We compute this directly in order to circumvent precision issues
+      # incurred by taking square roots and then re-squaring.
+      return calculate_global_norm(model_update)**2
+
+    @tff.tf_computation(tf.float32, tf.float32)
+    def compute_average_cosine_similarity(square_norm_of_sum, num_vectors):
+      """Calculate the average cosine similarity between unit length vectors.
+      Args:
+        square_norm_of_sum: The squared norm of the sum of the normalized vectors.
+        num_vectors: The number of vectors the sum was taken over.
+      Returns:
+        A float representing the average pairwise cosine similarity among all
+          vectors.
+      """
+      return (square_norm_of_sum - num_vectors) / (
+          num_vectors * (num_vectors - 1.0))
+    
+    # compute pairwise average cosine similarity
+    normalized_updates = tff.federated_map(normalize_vector, client_outputs.accumulated_gradients)
+    sum_of_normalized_updates = tff.federated_sum(normalized_updates)
+    square_norm_of_sum = tff.federated_map(calculate_square_global_norm,
+                                            sum_of_normalized_updates)
+    num_clients = tff.federated_sum(tff.federated_value(1.0, tff.CLIENTS))
+    average_cosine_similarity = tff.federated_map(
+        compute_average_cosine_similarity, (square_norm_of_sum, num_clients))
+    
+    # #compute outer product for a vector
+    # @tff.tf_computation(model_weights_type.trainable)
+    # def compute_outer_product(vector):
+    #   flatvs = tf.nest.map_structure(lambda v: tf.squeeze(tf.reshape(v,[1,-1])), vector)
+    #   flatv = tf.concat(tf.nest.flatten(flatvs),0)
+    #   outer_product = tf.matmul(tf.reshape(flatv, [-1,1]), tf.reshape(flatv,[1,-1]))
+    #   return outer_product
+    
+    # update_outer_product = tff.federated_map(compute_outer_product, normalized_updates)
+    # mean_outer_product = tff.federated_mean(update_outer_product)
+    # singular_vals = tff.federated_map(tff.tf_computation(lambda x: tf.squeeze(tf.linalg.svd(x, compute_uv=False))), mean_outer_product)
+    # determinant = tff.federated_map(tff.tf_computation(lambda x: tf.math.reduce_prod(x)), singular_vals)
+
+
+    
+    # compute cosine similarity between fedavg update and sgd update
+    aggregated_gradients_nonupdates = client_outputs.accumulated_gradients_nonupdate
+    sgd_grad_sum = tff.federated_sum(aggregated_gradients_nonupdates)
+    sgd_grad = tff.federated_map(compute_c, (sgd_grad_sum, num_client_grads))
+    sgd_grad_normalized = tff.federated_map(normalize_vector, sgd_grad)
+    fedavg_grad_normalized = tff.federated_map(normalize_vector, aggregated_gradients_fedavg)
+
+    @tff.tf_computation(model_weights_type.trainable, model_weights_type.trainable)
+    def dot_product(v1, v2):
+      flatv1 = tf.nest.map_structure(lambda v: tf.squeeze(tf.reshape(v, [1,-1])), v1)
+      flatv2 = tf.nest.map_structure(lambda v: tf.squeeze(tf.reshape(v, [1,-1])), v2)
+      dots = tf.nest.map_structure(lambda u, w: tf.tensordot(u, w, 1), flatv1, flatv2)
+      dot = tf.reduce_sum(tf.nest.flatten(dots))
+      return dot
+
+    sgd_vs_fedavg = tff.federated_map(dot_product, (sgd_grad_normalized, fedavg_grad_normalized))
+    
+    # compute average cosine similarity over client pseudogradients and sgd update
+    sgd_grad_broadcast = tff.federated_broadcast(sgd_grad_normalized)
+    sgd_client_pseudo_dots = tff.federated_map(dot_product, (sgd_grad_broadcast, normalized_updates))
+    sgd_client_pseudo_mean = tff.federated_mean(sgd_client_pseudo_dots)
+
+    # compute average cosine similarity between client gradients and sgd update
+    normalized_updates_sgd = tff.federated_map(normalize_vector, client_outputs.accumulated_gradients_nonupdate)
+    sgd_client_true_dots = tff.federated_map(dot_product, (sgd_grad_broadcast, normalized_updates_sgd))
+    sgd_client_true_mean = tff.federated_mean(sgd_client_true_dots)
+
+    # pseudogradient norm measurement
+    fedavg_pseudogradient_norm = tff.federated_map(calculate_global_norm, aggregated_gradients_fedavg)
+    sgd_gradient_norm = tff.federated_map(calculate_global_norm, sgd_grad)
+
     result = collections.OrderedDict(
         before_training=initial_aggregated_outputs,
-        during_training=aggregated_outputs)
+        during_training=aggregated_outputs,
+        average_cosine_similarity=average_cosine_similarity,
+        #determinant=determinant
+        sgd_vs_fedavg=sgd_vs_fedavg,
+        sgd_client_pseudo_mean=sgd_client_pseudo_mean,
+        sgd_client_true_mean=sgd_client_true_mean,
+        fedavg_pseudogradient_norm=fedavg_pseudogradient_norm,
+        sgd_gradient_norm=sgd_gradient_norm
+        )
 
     return server_state, client_state, result
 
