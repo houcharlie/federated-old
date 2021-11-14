@@ -167,7 +167,7 @@ class SwitchLR(object):
     if prev_round_num >= switch_round:
       swapped = True
     if swapped:
-      learning_rate = start_lr * self.decay_factor/num_client_grads
+      learning_rate = start_lr * self.decay_factor
     tf.print('prev_round_num', prev_round_num)
     tf.print(owner, learning_rate)
     tf.print('Swapped', swapped)
@@ -258,8 +258,8 @@ class MultistageLR(object):
   monitor = attr.ib(default='loss')
   best = attr.ib(default=1.0)
   switch_round = attr.ib(default=None)
+  swap_round = attr.ib(default=None)
   swapped = attr.ib(default=False)
-  allow_swap = attr.ib(default=True)
   decay_factor = attr.ib(default=0.1)
 
   def update(self, round_metric, num_client_grads):
@@ -270,6 +270,7 @@ class MultistageLR(object):
     switch_round = self.switch_round
     owner = self.owner
     swapped = self.swapped
+    swap_round = self.swap_round
     s = self.s
     sampled_clients = self.sampled_clients
     curr_stage_length = switch_round * 2. ** s
@@ -280,21 +281,20 @@ class MultistageLR(object):
       rounds_in_stage = 0
     else:
       rounds_in_stage += 1
-
-    if 2. ** (-s) < (1. / num_client_grads) * float(sampled_clients) and self.allow_swap and not swapped:
+    
+    if prev_round_num >= swap_round and not swapped:
       swapped = True
       s = 0.
-    if swapped:
-      learning_rate = self.decay_factor * start_lr * 2. ** (-s) / num_client_grads
-    else:
-      learning_rate = start_lr * 2. ** (-s)
+    
+    learning_rate = start_lr * 2. ** (-s)
 
     tf.print('Stage', s, 'Rounds in stage', rounds_in_stage)
     tf.print('Swapped', swapped)
     tf.print(owner, learning_rate)
     tf.print('Switch round', switch_round)
     tf.print('Total client grads', num_client_grads)
-    tf.print('Swap threshold', (1. / num_client_grads) * float(sampled_clients), 'Decay', 2. ** (-s))
+    tf.print('Swap round', swap_round)
+    tf.print('Curr round', prev_round_num)
 
 
     # Return an updated callback

@@ -58,6 +58,8 @@ with utils_impl.record_hparam_flags() as callback_flags:
       'callbacks.')
   flags.DEFINE_float(
       'switch_round', 0.1, 'Number of rounds before switching to minibatching ')
+  flags.DEFINE_float(
+      'swap_round', 0.1, 'Number of rounds before switching to minibatching in multistage ')
   flags.DEFINE_integer(
       'window_size', 100, 'Number of rounds to take a moving average over when '
       'estimating the training loss in learning rate callbacks.')
@@ -191,13 +193,13 @@ def main(argv):
         learning_rate=FLAGS.client_learning_rate,
         start_lr=FLAGS.client_learning_rate,
         s=0.,
-        decay_factor=0.,
+        decay_factor=1.,
         total_rounds=FLAGS.total_rounds,
         rounds_in_stage=0,
         swapped=bool(FLAGS.swapped),
         sampled_clients=FLAGS.clients_per_round,
         switch_round=FLAGS.switch_round*FLAGS.total_rounds,
-        allow_swap=bool(FLAGS.allow_swap))
+        swap_round=math.ceil(FLAGS.swap_round*FLAGS.total_rounds))
     server_lr_callback = callbacks.create_multistage_lr(
         owner='Server',
         learning_rate=FLAGS.server_learning_rate,
@@ -209,13 +211,13 @@ def main(argv):
         swapped=bool(FLAGS.swapped),
         sampled_clients=FLAGS.clients_per_round,
         switch_round=FLAGS.switch_round*FLAGS.total_rounds,
-        allow_swap=bool(FLAGS.allow_swap))
+        swap_round=math.ceil(FLAGS.swap_round*FLAGS.total_rounds))
   elif FLAGS.multistage == 0:
     client_lr_callback = callbacks.create_switch_lr(
         owner='Client',
         learning_rate=FLAGS.client_learning_rate,
         start_lr=FLAGS.client_learning_rate,
-        decay_factor=0.,
+        decay_factor=1.,
         switch_round=math.ceil(FLAGS.switch_round*FLAGS.total_rounds),
         swapped=bool(FLAGS.swapped))
     server_lr_callback = callbacks.create_switch_lr(

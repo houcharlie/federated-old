@@ -191,23 +191,25 @@ def run(iterative_process: tff.templates.IterativeProcess,
     raise TypeError('test_fn should be callable.')
 
   logging.info('Starting iterative_process training loop...')
-  state = iterative_process.initialize()
+  initial_state = iterative_process.initialize()
+  client_state = {x: iterative_process.client_init() for x in client_ids}
   checkpoint_mngr, metrics_mngr, tb_mngr, profiler = _setup_outputs(
       root_output_dir, experiment_name, rounds_per_profile)
 
-  #logging.info('Asking checkpoint manager to load checkpoint.')
-  #state, round_num = checkpoint_mngr.load_latest_checkpoint(initial_state)
-  round_num = 0
-  # if state is None:
-  #   logging.info('Initializing experiment from scratch.')
-  #   state = initial_state
-  #   
-  # else:
-  #   logging.info('Restarted from checkpoint round %d', round_num)
-  #   round_num += 1  # Increment to avoid overwriting current checkpoint
+  logging.info('Asking checkpoint manager to load checkpoint.')
+  state, round_num = checkpoint_mngr.load_latest_checkpoint(initial_state)
+  
+  if state is None:
+    round_num = 0
+    logging.info('Initializing experiment from scratch.')
+    state = initial_state
+  else:
+    logging.info('Restarted from checkpoint round %d', round_num)
+    round_num += 1  # Increment to avoid overwriting current checkpoint
+
   metrics_mngr.clear_metrics(round_num)
   current_model = iterative_process.get_model_weights(state)
-  client_state = {x: iterative_process.client_init() for x in client_ids}
+  
 
   loop_start_time = time.time()
   loop_start_round = round_num
@@ -242,6 +244,8 @@ def run(iterative_process: tff.templates.IterativeProcess,
       continue  # restart the loop without incrementing the round number
     
     current_model = iterative_process.get_model_weights(state)
+    fedavg_ghost_model = iterative_process.get_model_fedavg_weights(state)
+    mbsgd_ghost_model = iterative_process.get_model_mbsgd_weights(state)
     train_metrics['training_secs'] = time.time() - training_start_time
     train_metrics['model_delta_l2_norm'] = _compute_numpy_l2_difference(
         current_model, prev_model)
@@ -267,8 +271,13 @@ def run(iterative_process: tff.templates.IterativeProcess,
       validation_metrics = validation_fn(current_model, round_num)
       validation_metrics['evaluate_secs'] = time.time() - evaluate_start_time
       metrics['eval'] = validation_metrics
+      #metrics['eval_fedavg'] = validation_fn(fedavg_ghost_model, round_num)
+      #metrics['eval_mbsgd'] = validation_fn(mbsgd_ghost_model, round_num)
       train_eval_metrics = train_eval_fn(current_model, round_num)
       metrics['train_eval'] = train_eval_metrics
+      #metrics['train_eval_fedavg'] = train_eval_fn(fedavg_ghost_model, round_num)
+      #metrics['train_eval_mbsgd'] = train_eval_fn(mbsgd_ghost_model, round_num)
+      #metrics['prev_model_train_eval'] = train_eval_fn(prev_model, round_num)
       #print('Saving the singular values')
       #save_singular_vals(root_output_dir, experiment_name, round_num, singular_vals)
 
@@ -291,6 +300,11 @@ def run(iterative_process: tff.templates.IterativeProcess,
     test_metrics = test_fn(current_model)
     test_metrics['evaluate_secs'] = time.time() - test_start_time
     metrics['test'] = test_metrics
+    train_eval_metrics = train_eval_fn(current_model, round_num)
+    metrics['train_eval'] = train_eval_metrics
+    #metrics['train_eval_fedavg'] = train_eval_fn(fedavg_ghost_model, round_num)
+    #metrics['train_eval_mbsgd'] = train_eval_fn(mbsgd_ghost_model, round_num)
+    #metrics['prev_model_train_eval'] = train_eval_fn(prev_model, round_num)
   _write_metrics(metrics_mngr, tb_mngr, metrics, total_rounds)
 
   return state

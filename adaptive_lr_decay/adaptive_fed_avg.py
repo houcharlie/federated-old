@@ -64,6 +64,8 @@ class ServerState(object):
     server_lr_callback: A `callback.LROnPlateau` instance.
   """
   model = attr.ib()
+  model_ghost_fedavg = attr.ib()
+  model_ghost_mbsgd = attr.ib()
   optimizer_state = attr.ib()
   client_lr_callback = attr.ib()
   server_lr_callback = attr.ib()
@@ -85,7 +87,7 @@ def update_callback(server_state, num_client_grads, client_monitor_value, server
       server_monitor_value, num_client_grads)
   return updated_client_lr_callback, updated_server_lr_callback
 @tf.function
-def server_update(model, server_optimizer, server_state, aggregated_gradients,
+def server_update(model, model_fedavg, model_mbsgd, server_optimizer, server_optimizer_fedavg, server_optimizer_mbsgd, server_state, aggregated_gradients, fedavg_update, sgd_update,
                   client_monitor_value, server_monitor_value, num_client_grads,
                   updated_client_lr_callback, updated_server_lr_callback):
   """Updates `server_state` according to `weights_delta` and output metrics.
@@ -122,6 +124,35 @@ def server_update(model, server_optimizer, server_state, aggregated_gradients,
 
   server_optimizer.apply_gradients(grads_and_vars)
 
+  model_ghost_fedavg = _get_weights(model_fedavg)
+  tff.utils.assign(model_ghost_fedavg, server_state.model)
+  # Server optimizer variables must be initialized prior to invoking this
+  tff.utils.assign(server_optimizer_fedavg.variables(), server_state.optimizer_state)
+
+  # Apply the update to the model. Note that we do not multiply by -1.0, since
+  # we actually accumulate the client gradients.
+  grads_and_vars = [
+      (x, v) for x, v in zip(fedavg_update, model_ghost_fedavg.trainable)
+  ]
+
+  server_optimizer_fedavg.apply_gradients(grads_and_vars)
+
+  model_ghost_mbsgd = _get_weights(model_mbsgd)
+  tff.utils.assign(model_ghost_mbsgd, server_state.model)
+  # Server optimizer variables must be initialized prior to invoking this
+  tff.utils.assign(server_optimizer_mbsgd.variables(), server_state.optimizer_state)
+
+  # Apply the update to the model. Note that we do not multiply by -1.0, since
+  # we actually accumulate the client gradients.
+  grads_and_vars = [
+      (x, v) for x, v in zip(sgd_update, model_ghost_mbsgd.trainable)
+  ]
+
+  server_optimizer_mbsgd.apply_gradients(grads_and_vars)
+
+
+  
+
   # updated_client_lr_callback = server_state.client_lr_callback.update(
   #     client_monitor_value, num_client_grads)
   # updated_server_lr_callback = server_state.server_lr_callback.update(
@@ -131,6 +162,8 @@ def server_update(model, server_optimizer, server_state, aggregated_gradients,
   return tff.utils.update_state(
       server_state,
       model=model_weights,
+      model_ghost_fedavg=model_ghost_fedavg,
+      model_ghost_mbsgd=model_ghost_mbsgd,
       optimizer_state=server_optimizer.variables(),
       client_lr_callback=updated_client_lr_callback,
       server_lr_callback=updated_server_lr_callback)
@@ -206,11 +239,11 @@ def client_update(model,
   grad_sums = tf.nest.map_structure(tf.zeros_like, model_weights.trainable)
   grad_sums_sgd = tf.nest.map_structure(tf.zeros_like, model_weights.trainable)
   # compute the sgd update
-  # for batch in dataset:
-  #   with tf.GradientTape() as tape:
-  #     output = model.forward_pass(batch)
-  #   grads = tape.gradient(output.loss, model_weights.trainable)
-  #   grad_sums_sgd = tf.nest.map_structure(tf.add, grad_sums_sgd, grads)
+  for batch in dataset:
+    with tf.GradientTape() as tape:
+      output = model.forward_pass(batch)
+    grads = tape.gradient(output.loss, model_weights.trainable)
+    grad_sums_sgd = tf.nest.map_structure(tf.add, grad_sums_sgd, grads)
 
   # compute the fedavg updates
   for batch in dataset:
@@ -267,9 +300,13 @@ def build_server_init_fn(model_fn: ModelBuilder,
   def server_init_tf():
     server_optimizer = server_optimizer_fn(server_lr_callback.learning_rate)
     model = model_fn()
+    model_ghost_mbsgd = model_fn()
+    model_ghost_fedavg = model_fn()
     _initialize_optimizer_vars(model, server_optimizer)
     return ServerState(
         model=_get_weights(model),
+        model_ghost_fedavg=_get_weights(model_ghost_fedavg),
+        model_ghost_mbsgd=_get_weights(model_ghost_mbsgd),
         optimizer_state=server_optimizer.variables(),
         client_lr_callback=client_lr_callback,
         server_lr_callback=server_lr_callback)
@@ -355,20 +392,26 @@ def build_fed_avg_process(
     return tff.utils.update_state(
         client_output, initial_model_output=initial_model_output)
 
-  @tff.tf_computation(server_state_type, model_weights_type.trainable,
+  @tff.tf_computation(server_state_type, model_weights_type.trainable, model_weights_type.trainable, model_weights_type.trainable,
                       client_monitor_value_type, server_monitor_value_type,
                       tf.float32)
-  def server_update_fn(server_state, model_delta, client_monitor_value,
+  def server_update_fn(server_state, model_delta, fedavg_delta, sgd_delta, client_monitor_value,
                        server_monitor_value, num_client_grads):
     model = model_fn()
+    fedavg_model = model_fn()
+    mbsgd_model = model_fn()
     updated_client_callback, updated_server_callback = update_callback(server_state, num_client_grads,
                                                                        client_monitor_value, server_monitor_value)
-    server_lr = updated_server_callback.learning_rate
+    server_lr = server_state.server_lr_callback.learning_rate
     server_optimizer = server_optimizer_fn(server_lr)
+    server_optimizer_fedavg = server_optimizer_fn(server_lr)
+    server_optimizer_mbsgd = server_optimizer_fn(server_lr)
     # We initialize the server optimizer variables to avoid creating them
     # within the scope of the tf.function server_update.
     _initialize_optimizer_vars(model, server_optimizer)
-    return server_update(model, server_optimizer, server_state, model_delta,
+    _initialize_optimizer_vars(fedavg_model, server_optimizer_fedavg)
+    _initialize_optimizer_vars(mbsgd_model, server_optimizer_mbsgd)
+    return server_update(model, fedavg_model, mbsgd_model, server_optimizer, server_optimizer_fedavg, server_optimizer_mbsgd, server_state, model_delta, fedavg_delta, sgd_delta,
                          client_monitor_value, server_monitor_value, num_client_grads,
                          updated_client_callback, updated_server_callback)
   client_output_type = client_update_fn.type_signature.result
@@ -409,18 +452,24 @@ def build_fed_avg_process(
     client_outputs = tff.federated_map(
         client_update_fn, (federated_dataset, client_model, client_lr, client_state))
 
-    client_weight = client_outputs.client_weight
-    num_client_grads = tff.federated_sum(client_outputs.num_grads)
-    aggregated_gradients_fedavg = tff.federated_mean(
-          client_outputs.accumulated_gradients, weight=client_weight)
-    aggregated_gradients_sgd = tff.federated_sum(
-          client_outputs.accumulated_gradients)
-    
     # c is the minibatch gradient across all clients
     @tff.tf_computation(model_weights_type.trainable, tf.float32)
     def compute_c(aggregated_gradients_sgd, num_client_grads):
       c = tf.nest.map_structure(lambda a: a/num_client_grads, aggregated_gradients_sgd)
       return c
+
+    client_weight = client_outputs.client_weight
+    num_client_grads = tff.federated_sum(client_outputs.num_grads)
+    aggregated_gradients_fedavg = tff.federated_mean(
+          client_outputs.accumulated_gradients, weight=client_weight)
+    aggregated_gradients_nonupdates = client_outputs.accumulated_gradients_nonupdate
+    sgd_grad_sum = tff.federated_sum(aggregated_gradients_nonupdates)
+    # the sgd sampled gradient at the current iterate
+    sgd_grad = tff.federated_map(compute_c, (sgd_grad_sum, num_client_grads))
+  
+
+    aggregated_gradients_sgd = tff.federated_sum(
+          client_outputs.accumulated_gradients)
     c = tff.federated_broadcast(tff.federated_map(compute_c, (aggregated_gradients_sgd, num_client_grads)))
     # c_i is the minibatch gradient within one client
     @tff.tf_computation(client_output_type.accumulated_gradients, client_output_type.num_grads)
@@ -448,9 +497,24 @@ def build_fed_avg_process(
 
     aggregated_gradients = tff.federated_map(choose_aggregation, 
                                              (aggregated_gradients_fedavg, 
-                                              aggregated_gradients_sgd,
+                                              sgd_grad,
                                               server_state.server_lr_callback.swapped)
                                             )
+    # pseudogradient norm measurement
+    @tff.tf_computation(model_weights_type.trainable)
+    def calculate_global_norm(model_update):
+      """Calculate the global norm across all layers of the model update."""
+      return tf.linalg.global_norm(tf.nest.flatten(model_update))
+    
+    @tff.tf_computation(model_weights_type.trainable, swapped_type, tf.float32)
+    def choose_which_norm(aggregated_gradients, swapped, num_gradients):
+      return tf.cond(swapped,
+                      lambda: tf.nest.map_structure(lambda x: x/num_gradients, aggregated_gradients),
+                      lambda: aggregated_gradients)
+    proper_normalized_server_update = tff.federated_map(choose_which_norm, (aggregated_gradients, server_state.server_lr_callback.swapped, num_client_grads))
+    server_update_norm = tff.federated_map(calculate_global_norm, proper_normalized_server_update)
+
+    
     initial_aggregated_outputs = dummy_model.federated_output_computation(
         client_outputs.initial_model_output)
     if isinstance(initial_aggregated_outputs.type_signature, tff.StructType):
@@ -464,14 +528,11 @@ def build_fed_avg_process(
     server_monitor_value = initial_aggregated_outputs[server_monitor]
 
     server_state = tff.federated_map(
-        server_update_fn, (server_state, aggregated_gradients,
+        server_update_fn, (server_state, aggregated_gradients,aggregated_gradients_fedavg,sgd_grad,
                            client_monitor_value, server_monitor_value,
                            num_client_grads))
 
-    @tff.tf_computation(model_weights_type.trainable)
-    def calculate_global_norm(model_update):
-      """Calculate the global norm across all layers of the model update."""
-      return tf.linalg.global_norm(tf.nest.flatten(model_update))
+    
 
     @tff.tf_computation(model_weights_type.trainable)
     def normalize_vector(model_update):
@@ -507,27 +568,9 @@ def build_fed_avg_process(
     average_cosine_similarity = tff.federated_map(
         compute_average_cosine_similarity, (square_norm_of_sum, num_clients))
     
-    # #compute outer product for a vector
-    # @tff.tf_computation(model_weights_type.trainable)
-    # def compute_outer_product(vector):
-    #   flatvs = tf.nest.map_structure(lambda v: tf.squeeze(tf.reshape(v,[1,-1])), vector)
-    #   flatv = tf.concat(tf.nest.flatten(flatvs),0)
-    #   outer_product = tf.matmul(tf.reshape(flatv, [-1,1]), tf.reshape(flatv,[1,-1]))
-    #   return outer_product
-    
-    # update_outer_product = tff.federated_map(compute_outer_product, normalized_updates)
-    # mean_outer_product = tff.federated_mean(update_outer_product)
-    # singular_vals = tff.federated_map(tff.tf_computation(lambda x: tf.squeeze(tf.linalg.svd(x, compute_uv=False))), mean_outer_product)
-    # determinant = tff.federated_map(tff.tf_computation(lambda x: tf.math.reduce_prod(x)), singular_vals)
-
-
-    
     # compute cosine similarity between fedavg update and sgd update
-    aggregated_gradients_nonupdates = client_outputs.accumulated_gradients_nonupdate
-    sgd_grad_sum = tff.federated_sum(aggregated_gradients_nonupdates)
-    sgd_grad = tff.federated_map(compute_c, (sgd_grad_sum, num_client_grads))
     sgd_grad_normalized = tff.federated_map(normalize_vector, sgd_grad)
-    fedavg_grad_normalized = tff.federated_map(normalize_vector, aggregated_gradients_fedavg)
+    server_update_normalized = tff.federated_map(normalize_vector, aggregated_gradients)
 
     @tff.tf_computation(model_weights_type.trainable, model_weights_type.trainable)
     def dot_product(v1, v2):
@@ -537,7 +580,7 @@ def build_fed_avg_process(
       dot = tf.reduce_sum(tf.nest.flatten(dots))
       return dot
 
-    sgd_vs_fedavg = tff.federated_map(dot_product, (sgd_grad_normalized, fedavg_grad_normalized))
+    sgd_vs_serverupdate = tff.federated_map(dot_product, (sgd_grad_normalized, server_update_normalized))
     
     # compute average cosine similarity over client pseudogradients and sgd update
     sgd_grad_broadcast = tff.federated_broadcast(sgd_grad_normalized)
@@ -549,20 +592,20 @@ def build_fed_avg_process(
     sgd_client_true_dots = tff.federated_map(dot_product, (sgd_grad_broadcast, normalized_updates_sgd))
     sgd_client_true_mean = tff.federated_mean(sgd_client_true_dots)
 
-    # pseudogradient norm measurement
-    fedavg_pseudogradient_norm = tff.federated_map(calculate_global_norm, aggregated_gradients_fedavg)
+    
     sgd_gradient_norm = tff.federated_map(calculate_global_norm, sgd_grad)
+    fedavg_norm = tff.federated_map(calculate_global_norm, aggregated_gradients_fedavg)
 
     result = collections.OrderedDict(
         before_training=initial_aggregated_outputs,
         during_training=aggregated_outputs,
         average_cosine_similarity=average_cosine_similarity,
-        #determinant=determinant
-        sgd_vs_fedavg=sgd_vs_fedavg,
+        sgd_vs_serverupdate=sgd_vs_serverupdate,
         sgd_client_pseudo_mean=sgd_client_pseudo_mean,
         sgd_client_true_mean=sgd_client_true_mean,
-        fedavg_pseudogradient_norm=fedavg_pseudogradient_norm,
-        sgd_gradient_norm=sgd_gradient_norm
+        server_update_norm=server_update_norm,
+        sgd_gradient_norm=sgd_gradient_norm,
+        fedavg_norm=fedavg_norm
         )
 
     return server_state, client_state, result
@@ -579,9 +622,20 @@ def build_fed_avg_process(
   @tff.tf_computation(server_state_type)
   def get_model_weights(server_state):
     return server_state.model
+
+  @tff.tf_computation(server_state_type)
+  def get_model_fedavg_weights(server_state):
+    return server_state.model_ghost_fedavg
+
+  @tff.tf_computation(server_state_type)
+  def get_model_mbsgd_weights(server_state):
+    return server_state.model_ghost_mbsgd
+      
   @tff.tf_computation
   def client_init():
     return client_init_tf()
   iterative_process.get_model_weights = get_model_weights
+  iterative_process.get_model_fedavg_weights = get_model_fedavg_weights
+  iterative_process.get_model_mbsgd_weights = get_model_mbsgd_weights
   iterative_process.client_init = client_init
   return iterative_process

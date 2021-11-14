@@ -96,6 +96,8 @@ def configure_training(
   client_sampling_fn = lambda x: list(client_ids_fn(x))
 
   training_process.get_model_weights = iterative_process.get_model_weights
+  training_process.get_model_fedavg_weights = iterative_process.get_model_fedavg_weights
+  training_process.get_model_mbsgd_weights = iterative_process.get_model_mbsgd_weights
   training_process.client_init = iterative_process.client_init
   test_fn = training_utils.build_centralized_evaluate_fn(
       eval_dataset=cifar_test,
