@@ -284,7 +284,6 @@ class MultistageLR(object):
     
     if prev_round_num >= swap_round and not swapped:
       swapped = True
-      s = 0.
     
     learning_rate = start_lr * 2. ** (-s)
 

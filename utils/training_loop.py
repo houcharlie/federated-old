@@ -244,8 +244,6 @@ def run(iterative_process: tff.templates.IterativeProcess,
       continue  # restart the loop without incrementing the round number
     
     current_model = iterative_process.get_model_weights(state)
-    fedavg_ghost_model = iterative_process.get_model_fedavg_weights(state)
-    mbsgd_ghost_model = iterative_process.get_model_mbsgd_weights(state)
     train_metrics['training_secs'] = time.time() - training_start_time
     train_metrics['model_delta_l2_norm'] = _compute_numpy_l2_difference(
         current_model, prev_model)

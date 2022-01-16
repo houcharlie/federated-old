@@ -4,14 +4,14 @@ with open('txtfiles/switch.txt', 'w+') as f:
     f.write("\n")
     for lr in np.linspace(0.05, 0.25, num=5):
         for switch in np.linspace(0.1, 0.9, num=5):
-            for control in [0,1]:
+            for control in [0]:
                 f.write("{0} {1} {2}\n".format(
                         round(lr,4),
                         round(switch,4),
                         control
                     ))
         f.write("{0} 200 0\n".format(round(lr,4)))
-        f.write("{0} 200 1\n".format(round(lr,4)))
+        #f.write("{0} 200 1\n".format(round(lr,4)))
 
 with open('txtfiles/switch_emnist.txt', 'w+') as f:
     f.write("\n")
@@ -49,7 +49,7 @@ with open('txtfiles/minibatch_cifar.txt', 'w+') as f:
 with open('txtfiles/multistage.txt', 'w+') as f:
     f.write("\n")
     for lr in np.linspace(0.1, 0.5, num=5):
-        for control in [1]:
+        for control in [0]:
             for switch in np.linspace(0.1, 0.45, num=3):
                 for swap_round in [0.5, 0.7, 0.9, 200]:
                     f.write("{0} {1} {2} {3}\n".format(
