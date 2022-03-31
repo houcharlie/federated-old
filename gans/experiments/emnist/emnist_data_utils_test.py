@@ -13,6 +13,8 @@
 # limitations under the License.
 """Test Federated EMNIST dataset utilities."""
 
+import collections
+
 import numpy as np
 import tensorflow as tf
 import tensorflow_federated as tff
@@ -28,13 +30,25 @@ def _summarize_model(model):
 
 
 def _get_example_client_dataset():
-  client_data = tff.simulation.datasets.emnist.get_synthetic(num_clients=1)
+  client_data = tff.simulation.datasets.emnist.get_synthetic()
   return client_data.create_tf_dataset_for_client(client_data.client_ids[0])
 
 
 def _get_example_client_dataset_containing_lowercase():
-  _, client_data = tff.simulation.datasets.emnist.load_data(only_digits=False)
-  return client_data.create_tf_dataset_for_client(client_data.client_ids[0])
+  example_ds = _get_example_client_dataset()
+  example_image = next(iter(example_ds))['pixels'].numpy()
+  num_labels = 62
+  image_list = [example_image for _ in range(num_labels)]
+  label_list = list(range(num_labels))
+  synthetic_data = collections.OrderedDict([
+      ('label', label_list),
+      ('pixels', image_list),
+  ])
+  return tf.data.Dataset.from_tensor_slices(synthetic_data)
+
+
+def _compute_dataset_length(dataset):
+  return dataset.reduce(0, lambda x, _: x + 1)
 
 
 class EmnistTest(tf.test.TestCase):
@@ -57,34 +71,47 @@ class EmnistTest(tf.test.TestCase):
         self.assertGreaterEqual(np.average(image), 0.7)
 
   def test_preprocessed_img_labels_are_case_agnostic(self):
-    raw_images_ds = _get_example_client_dataset_containing_lowercase()
+    total_num_labels = 62
+    raw_dataset = _get_example_client_dataset_containing_lowercase()
+    raw_dataset_iterator = iter(raw_dataset)
+    num_raw_images = _compute_dataset_length(raw_dataset)
+    self.assertEqual(num_raw_images, total_num_labels)
 
-    raw_ds_iterator = iter(raw_images_ds)
-    # The first element in the raw dataset is an uppercase 'I' (label is 18).
-    self.assertEqual(next(raw_ds_iterator)['label'].numpy(), 18)
-    # The second element in the raw dataset is an uppercase 'C' (label is 12).
-    self.assertEqual(next(raw_ds_iterator)['label'].numpy(), 12)
-    # The third element in the raw dataset is a lowercase 'd' (label is 39).
-    self.assertEqual(next(raw_ds_iterator)['label'].numpy(), 47)
+    processed_dataset = emnist_data_utils.preprocess_img_dataset(
+        raw_dataset, include_label=True, batch_size=None, shuffle=False)
+    processed_dataset_iterator = iter(processed_dataset)
+    num_processed_images = _compute_dataset_length(processed_dataset)
+    self.assertEqual(num_processed_images, total_num_labels)
 
-    processed_ds = emnist_data_utils.preprocess_img_dataset(
-        raw_images_ds, include_label=True, batch_size=BATCH_SIZE, shuffle=False)
-    _, label_batch = next(iter(processed_ds))
-    processed_label_iterator = iter(label_batch)
-    # The first element (in first batch) in the processed dataset has a case
-    # agnostic label of 18 (i.e., assert that value remains unchanged).
-    self.assertEqual(next(processed_label_iterator).numpy(), 18)
-    # The second element (in first batch) in the processed dataset has a case
-    # agnostic label of 12 (i.e., assert that value remains unchanged).
-    self.assertEqual(next(processed_label_iterator).numpy(), 12)
-    # The third element (in first batch) in the processed dataset should now
-    # have a case agnostic label of 47 - 26 = 21.
-    self.assertEqual(next(processed_label_iterator).numpy(), 47 - 26)
+    for _ in range(total_num_labels):
+      raw_label = next(raw_dataset_iterator)['label']
+      if raw_label > 35:
+        raw_label = raw_label - 26  # Convert from lowercase to capital
 
-    for _, label_batch in iter(processed_ds):
-      for label in label_batch:
-        self.assertGreaterEqual(label, 0)
-        self.assertLessEqual(label, 36)
+      processed_label = next(processed_dataset_iterator)[1]
+      self.assertEqual(raw_label, processed_label)
+
+  def test_create_real_images_tff_client_data_with_one_pseudoclient(self):
+    client_data = emnist_data_utils.create_real_images_tff_client_data(
+        split='synthetic', num_pseudo_clients=1)
+    synthetic_emnist_data = tff.simulation.datasets.emnist.get_synthetic()
+    self.assertEqual(client_data.client_ids, synthetic_emnist_data.client_ids)
+    for client_id in client_data.client_ids:
+      actual_ds = client_data.create_tf_dataset_for_client(client_id)
+      expected_ds = synthetic_emnist_data.create_tf_dataset_for_client(
+          client_id)
+      self.assertAllClose(list(actual_ds), list(expected_ds))
+
+  def test_create_real_images_tff_client_data_with_pseudoclients(self):
+    if tf.config.list_logical_devices('GPU'):
+      self.skipTest('skip GPU test')
+    num_pseudo_clients = 5
+    client_data = emnist_data_utils.create_real_images_tff_client_data(
+        split='synthetic', num_pseudo_clients=num_pseudo_clients)
+    synthetic_emnist_data = tff.simulation.datasets.emnist.get_synthetic()
+    expected_num_clients_ids = num_pseudo_clients * len(
+        synthetic_emnist_data.client_ids)
+    self.assertLen(client_data.client_ids, expected_num_clients_ids)
 
 
 if __name__ == '__main__':

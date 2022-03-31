@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
+
 from absl.testing import parameterized
 import tensorflow as tf
 import tensorflow_federated as tff
@@ -27,10 +29,10 @@ from gans import tff_gans
 # all other hyperparams are set as they are. These values are asserted so as to
 # provide a check for code changes that alter the behavior of the TFF GAN.
 BEFORE_DP_L2_NORM_CLIP = 100.0
-AFTER_2_RDS_DP_L2_NORM_CLIP = 100.4799957
+AFTER_2_RDS_DP_L2_NORM_CLIP = 100.08
 
 BEFORE_DP_STD_DEV = 30.0000019
-AFTER_2_RDS_DP_STD_DEV = 30.1439991
+AFTER_2_RDS_DP_STD_DEV = 30.024002
 
 UPDATE_DP_L2_NORM_CLIP = 500.0
 
@@ -45,13 +47,15 @@ def _get_gan(with_dp=False):
       gan_loss_fns, client_disc_optimizer)
 
   if with_dp:
-    dp_average_query = tensorflow_privacy.QuantileAdaptiveClipAverageQuery(
-        initial_l2_norm_clip=BEFORE_DP_L2_NORM_CLIP,
-        noise_multiplier=0.3,
-        target_unclipped_quantile=3,
-        learning_rate=0.1,
-        clipped_count_stddev=0.0,
-        expected_num_records=10,
+    dp_average_query = tensorflow_privacy.NormalizedQuery(
+        tensorflow_privacy.QuantileAdaptiveClipSumQuery(
+            initial_l2_norm_clip=BEFORE_DP_L2_NORM_CLIP,
+            noise_multiplier=0.3,
+            target_unclipped_quantile=1,
+            learning_rate=0.1,
+            clipped_count_stddev=0.0,
+            expected_num_records=10,
+            geometric_update=False),
         denominator=10.0)
   else:
     dp_average_query = None
@@ -80,11 +84,11 @@ class TffGansTest(tf.test.TestCase, parameterized.TestCase):
 
     # Validate the initial state of the server counters.
     self.assertDictEqual(
-        server_state.counters, {
-            'num_rounds': 0,
-            'num_generator_train_examples': 0,
-            'num_discriminator_train_examples': 0
-        })
+        server_state.counters,
+        collections.OrderedDict(
+            num_discriminator_train_examples=0,
+            num_generator_train_examples=0,
+            num_rounds=0))
 
     # Check that the aggregation state (where DP parameters might be tracked,
     # depending on setup) is initialized to empty.
@@ -106,12 +110,20 @@ class TffGansTest(tf.test.TestCase, parameterized.TestCase):
                                 from_server)
     self.assertDictEqual(
         client_output.counters,
-        {'num_discriminator_train_examples': 10 * one_dim_gan.BATCH_SIZE})
+        collections.OrderedDict(num_discriminator_train_examples=10 *
+                                one_dim_gan.BATCH_SIZE))
 
   @parameterized.named_parameters(('no_dp', False), ('dp', True))
   def test_server_computation(self, with_dp):
     gan = _get_gan(with_dp)
     initial_state_comp = tff_gans.build_server_initial_state_comp(gan)
+    server_state_without_aggregation = initial_state_comp()
+    server_state = gan_training_tf_fns.ServerState(
+        server_state_without_aggregation.generator_weights,
+        server_state_without_aggregation.discriminator_weights,
+        server_state_without_aggregation.counters,
+        aggregation_state=gan.aggregation_process.initialize())
+    server_state_type = tff.framework.type_from_tensors(server_state)
 
     # TODO(b/131700944): Remove this workaround, and directly instantiate a
     # ClientOutput instance (once TFF has a utility to infer TFF types of
@@ -125,33 +137,28 @@ class TffGansTest(tf.test.TestCase, parameterized.TestCase):
               for v in discriminator.weights
           ],
           update_weight=1.0,
-          counters={'num_discriminator_train_examples': 13})
+          counters=collections.OrderedDict(num_discriminator_train_examples=13))
+
+    server_comp = tff_gans.build_server_computation(
+        gan, server_state_type, client_output_fn.type_signature.result,
+        gan.aggregation_process.state_type.member)
 
     def _update_aggregation_state(with_dp, aggregation_state):
       if not with_dp:
         return aggregation_state
-
       dp_averaging_state = aggregation_state[0]
-      new_sum_state = tff.utils.update_state(
+      new_sum_state = tff.structure.update_struct(
           dp_averaging_state.numerator_state.sum_state,
           l2_norm_clip=UPDATE_DP_L2_NORM_CLIP)
-      new_numerator_state = tff.utils.update_state(
+      new_numerator_state = tff.structure.update_struct(
           dp_averaging_state.numerator_state, sum_state=new_sum_state)
-      new_dp_averaging_state = tff.utils.update_state(
+      new_dp_averaging_state = tff.structure.update_struct(
           dp_averaging_state, numerator_state=new_numerator_state)
       return (new_dp_averaging_state, ())
 
-    server_comp = tff_gans.build_server_computation(
-        gan, initial_state_comp.type_signature.result,
-        client_output_fn.type_signature.result,
-        gan.aggregation_process.state_type.member)
-
-    server_state = initial_state_comp()
-    server_state.aggregation_state = gan.aggregation_process.initialize()
-
-    client_output = client_output_fn()
     new_aggregation_state = _update_aggregation_state(
         with_dp, server_state.aggregation_state)
+    client_output = client_output_fn()
     final_server_state = server_comp(
         server_state,
         one_dim_gan.create_generator_inputs().take(7), client_output,
@@ -159,17 +166,17 @@ class TffGansTest(tf.test.TestCase, parameterized.TestCase):
 
     # Check that server counters have incremented (compare before and after).
     self.assertDictEqual(
-        server_state.counters, {
-            'num_rounds': 0,
-            'num_generator_train_examples': 0,
-            'num_discriminator_train_examples': 0
-        })
+        server_state.counters,
+        collections.OrderedDict(
+            num_discriminator_train_examples=0,
+            num_generator_train_examples=0,
+            num_rounds=0))
     self.assertDictEqual(
-        final_server_state.counters, {
-            'num_rounds': 1,
-            'num_discriminator_train_examples': 13,
-            'num_generator_train_examples': 7 * one_dim_gan.BATCH_SIZE
-        })
+        final_server_state.counters,
+        collections.OrderedDict(
+            num_discriminator_train_examples=13,
+            num_generator_train_examples=7 * one_dim_gan.BATCH_SIZE,
+            num_rounds=1))
 
     if with_dp:
       # Check that DP averaging aggregator state reflects the new state that was
@@ -220,14 +227,12 @@ class TffGansTest(tf.test.TestCase, parameterized.TestCase):
     # Check that server counters have incremented.
     counters = server_state.counters
     self.assertDictEqual(
-        counters, {
-            'num_rounds':
-                num_rounds,
-            'num_generator_train_examples':
-                one_dim_gan.BATCH_SIZE * num_rounds,
-            'num_discriminator_train_examples':
-                num_rounds * one_dim_gan.BATCH_SIZE * sum(client_dataset_sizes),
-        })
+        counters,
+        collections.OrderedDict(
+            num_discriminator_train_examples=num_rounds *
+            one_dim_gan.BATCH_SIZE * sum(client_dataset_sizes),
+            num_generator_train_examples=one_dim_gan.BATCH_SIZE * num_rounds,
+            num_rounds=num_rounds))
 
     if with_dp:
       # Check that DP averaging aggregator state has updated properly over the

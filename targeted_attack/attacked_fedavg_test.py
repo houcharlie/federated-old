@@ -14,7 +14,7 @@
 """End-to-end example testing targeted attacks against the MNIST model."""
 
 import collections
-
+from typing import Callable, List, OrderedDict
 import numpy as np
 import tensorflow as tf
 import tensorflow_federated as tff
@@ -61,9 +61,14 @@ def create_mnist_variables():
       accuracy_sum=tf.Variable(0.0, name='accuracy_sum', trainable=False))
 
 
-def mnist_forward_pass(variables, batch):
+def mnist_predict_on_batch(variables, batch):
   y = tf.nn.softmax(tf.matmul(batch['x'], variables.weights) + variables.bias)
   predictions = tf.cast(tf.argmax(y, 1), tf.int64)
+  return y, predictions
+
+
+def mnist_forward_pass(variables, batch):
+  y, predictions = mnist_predict_on_batch(variables, batch)
   flat_labels = tf.reshape(batch['y'], [-1])
   loss = -tf.reduce_mean(
       tf.reduce_sum(tf.one_hot(flat_labels, 10) * tf.math.log(y), axis=[1]))
@@ -75,7 +80,6 @@ def mnist_forward_pass(variables, batch):
   variables.num_examples.assign_add(num_examples)
   variables.loss_sum.assign_add(loss * num_examples)
   variables.accuracy_sum.assign_add(accuracy * num_examples)
-
   return loss, predictions
 
 
@@ -89,11 +93,11 @@ def get_local_mnist_metrics(variables):
 
 @tff.federated_computation
 def aggregate_mnist_metrics_across_clients(metrics):
-  return {
+  return collections.OrderedDict({
       'num_examples': tff.federated_sum(metrics.num_examples),
       'loss': tff.federated_mean(metrics.loss, metrics.num_examples),
       'accuracy': tff.federated_mean(metrics.accuracy, metrics.num_examples)
-  }
+  })
 
 
 class MnistModel(tff.learning.Model):
@@ -123,6 +127,12 @@ class MnistModel(tff.learning.Model):
         y=tf.TensorSpec([None, 1], tf.int64))
 
   @tf.function
+  def predict_on_batch(self, batch, training=True):
+    del training
+    logits, predictions = mnist_forward_pass(self._variables, batch)
+    return logits, predictions
+
+  @tf.function
   def forward_pass(self, batch, training=True):
     del training
     loss, predictions = mnist_forward_pass(self._variables, batch)
@@ -132,22 +142,38 @@ class MnistModel(tff.learning.Model):
         num_examples=tf.shape(predictions)[0])
 
   @tf.function
-  def report_local_outputs(self):
-    return get_local_mnist_metrics(self._variables)
+  def report_local_unfinalized_metrics(
+      self) -> OrderedDict[str, List[tf.Tensor]]:
+    """Creates an `OrderedDict` of metric names to unfinalized values."""
+    return collections.OrderedDict(
+        num_examples=[self._variables.num_examples],
+        loss=[self._variables.loss_sum, self._variables.num_examples],
+        accuracy=[self._variables.accuracy_sum, self._variables.num_examples])
 
-  @property
-  def federated_output_computation(self):
-    return aggregate_mnist_metrics_across_clients
+  def metric_finalizers(
+      self) -> OrderedDict[str, Callable[[List[tf.Tensor]], tf.Tensor]]:
+    """Creates an `OrderedDict` of metric names to finalizers."""
+    return collections.OrderedDict(
+        num_examples=tf.function(func=lambda x: x[0]),
+        loss=tf.function(func=lambda x: x[0] / x[1]),
+        accuracy=tf.function(func=lambda x: x[0] / x[1]))
+
+  @tf.function
+  def reset_metrics(self):
+    """Resets metrics variables to initial value."""
+    raise NotImplementedError(
+        'The `reset_metrics` method isn\'t implemented for your custom '
+        '`tff.learning.Model`. Please implement it before using this method. '
+        'You can leave this method unimplemented if you won\'t use this method.'
+    )
 
 
 def create_client_data():
+  rng = np.random.default_rng(1)
   emnist_batch = collections.OrderedDict(
-      label=[5], pixels=np.random.rand(28, 28))
-  output_types = collections.OrderedDict(label=tf.int64, pixels=tf.float32)
-  output_shapes = collections.OrderedDict(
-      label=tf.TensorShape([1]), pixels=tf.TensorShape([28, 28]))
-  dataset = tf.data.Dataset.from_generator(lambda: (yield emnist_batch),
-                                           output_types, output_shapes)
+      label=[np.asarray([5]).astype(np.int64)],
+      pixels=[rng.random((28, 28), dtype=np.float32)])
+  dataset = tf.data.Dataset.from_tensor_slices(emnist_batch)
 
   def client_data():
     return tff.simulation.models.mnist.keras_dataset_from_emnist(
@@ -244,12 +270,10 @@ class ServerTest(tf.test.TestCase):
 
   def _assert_server_update_with_all_ones(self, model_fn):
     optimizer_fn = lambda: tf.keras.optimizers.SGD(learning_rate=0.1)
-    model = tf.keras.models.Sequential([
-        tf.keras.layers.Input(shape=(784,)),
-        tf.keras.layers.Flatten(),
-        tf.keras.layers.Dense(units=10, kernel_initializer='zeros'),
-        tf.keras.layers.Softmax(),
-    ])
+    model = model_fn()
+    # Initialize the model weights with all zeros.
+    for var in model.trainable_variables:
+      var.assign(tf.zeros_like(var))
     optimizer = optimizer_fn()
     state, optimizer_vars = server_init(model, optimizer)
     weights_delta = tf.nest.map_structure(
@@ -287,7 +311,8 @@ class ClientTest(tf.test.TestCase):
       outputs = client_update(model, optimizer, client_data(), client_data(),
                               tf.constant(False),
                               attacked_fedavg._get_weights(model))
-      losses.append(outputs.model_output['loss'].numpy())
+      loss_finalizer = model.metric_finalizers()['loss']
+      losses.append(loss_finalizer(outputs.model_output['loss']))
 
     self.assertAllEqual(outputs.optimizer_output['num_examples'].numpy(), 2)
     self.assertLess(losses[1], losses[0])
@@ -303,12 +328,10 @@ class AggregationTest(tf.test.TestCase):
     malicious_data = [batch]
     client_type_list = [tf.constant(False)]
     l2_norm = 0.01
-    query = tensorflow_privacy.GaussianAverageQuery(l2_norm, 0.0, 1.0)
+    query = tensorflow_privacy.GaussianSumQuery(l2_norm, 0.0)
     dp_agg_factory = tff.aggregators.DifferentiallyPrivateFactory(query)
-    aggregation_process = dp_agg_factory.create(
-        tff.learning.framework.weights_type_from_model(_model_fn).trainable)
     trainer = build_federated_averaging_process_attacked(
-        _model_fn, aggregation_process=aggregation_process)
+        _model_fn, model_update_aggregation_factory=dp_agg_factory)
     state = trainer.initialize()
     initial_weights = state.model.trainable
     state, _ = trainer.next(state, train_data, malicious_data, client_type_list)

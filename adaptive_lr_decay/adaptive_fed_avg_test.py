@@ -34,7 +34,7 @@ def _create_client_data(num_batches=2):
 
 def _uncompiled_model_builder():
   keras_model = tf.keras.Sequential([
-      tf.keras.layers.Input(shape=(1,)),
+      tf.keras.layers.InputLayer(input_shape=(1,)),
       tf.keras.layers.Dense(
           units=1, kernel_initializer='zeros', bias_initializer='zeros')
   ])
@@ -55,13 +55,6 @@ class AdaptiveFedAvgTest(tf.test.TestCase):
     state = iterative_process.initialize()
     for round_num in range(num_rounds):
       state, metrics = iterative_process.next(state, client_datasets)
-      # iteration_result = iterative_process.next(state, client_datasets)
-      # if hasattr(iteration_result['result'], 'train'):
-      #   # tff.learning returns a nested tuple of metrics, we only compare
-      #   # against `train`.
-      #   train_outputs.append(iteration_result['result'].train)
-      # else:
-      #   train_outputs.append(iteration_result['result'])
       train_outputs.append(metrics)
       logging.info('Round %d: %s', round_num, metrics)
       logging.info('Model: %s', state.model)
@@ -315,7 +308,10 @@ class AdaptiveFedAvgTest(tf.test.TestCase):
                 y=tff.TensorType(tf.float32, [None, 1]))), tff.CLIENTS)
 
     metrics_type = tff.FederatedType(
-        collections.OrderedDict(loss=tff.TensorType(tf.float32)), tff.SERVER)
+        collections.OrderedDict(
+            loss=tff.TensorType(tf.float32),
+            num_examples=tff.TensorType(tf.int64),
+            num_batches=tff.TensorType(tf.int64)), tff.SERVER)
     output_type = collections.OrderedDict(
         before_training=metrics_type, during_training=metrics_type)
 

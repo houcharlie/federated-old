@@ -11,21 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""An example training loop lossily compressing the server/client communication.
+r"""An example training loop lossily compressing the server/client communication.
 
 Example command line flags to use to run an experiment:
---client_optimizer=sgd
---client_learning_rate=0.2
---server_optimizer=sgd
---server_learning_rate=1.0
---use_compression=True
---broadcast_quantization_bits=8
---aggregation_quantization_bits=8
+--client_optimizer=sgd \
+--client_learning_rate=0.2 \
+--server_optimizer=sgd \
+--server_learning_rate=1.0 \
+--use_compression=True \
+--broadcast_quantization_bits=8 \
+--aggregation_quantization_bits=8 \
 --use_sparsity_in_aggregation=True
 """
 
 import functools
-import os.path
 
 from absl import app
 from absl import flags
@@ -33,11 +32,9 @@ import tensorflow as tf
 import tensorflow_federated as tff
 
 from compression import sparsity
-from utils import training_loop
 from utils import training_utils
 from utils import utils_impl
-from utils.datasets import emnist_dataset
-from utils.models import emnist_models
+from utils.optimizers import optimizer_utils
 from tensorflow_model_optimization.python.core.internal import tensor_encoding as te
 
 
@@ -55,8 +52,8 @@ with utils_impl.record_new_flags():
       'dataset (62 characters).')
 
   # Optimizer configuration (this defines one or more flags per optimizer).
-  utils_impl.define_optimizer_flags('server')
-  utils_impl.define_optimizer_flags('client')
+  optimizer_utils.define_optimizer_flags('server')
+  optimizer_utils.define_optimizer_flags('client')
 
   # Compression hyperparameters.
   flags.DEFINE_boolean('use_compression', True,
@@ -85,27 +82,10 @@ with utils_impl.record_new_flags() as training_loop_flags:
       'How often to evaluate the global model on the validation dataset.')
   flags.DEFINE_integer('rounds_per_checkpoint', 50,
                        'How often to checkpoint the global model.')
-  flags.DEFINE_integer(
-      'rounds_per_profile', 0,
-      '(Experimental) How often to run the experimental TF profiler, if >0.')
 
 # End of hyperparameter flags.
 
 FLAGS = flags.FLAGS
-
-
-def model_builder():
-  """Create a keras model based on the original FedAvg CNN."""
-  return emnist_models.create_original_fedavg_cnn_model(
-      only_digits=FLAGS.only_digits)
-
-
-def loss_builder():
-  return tf.keras.losses.SparseCategoricalCrossentropy()
-
-
-def metrics_builder():
-  return [tf.keras.metrics.SparseCategoricalAccuracy()]
 
 
 def _broadcast_encoder_fn(value):
@@ -134,7 +114,7 @@ def _broadcast_encoder_fn(value):
     return te.encoders.as_simple_encoder(te.encoders.identity(), spec)
 
 
-def _mean_encoder_fn(value):
+def _mean_encoder_fn(spec):
   """Function for building encoded mean.
 
   This method decides, based on the tensor size, whether to use lossy
@@ -144,15 +124,13 @@ def _mean_encoder_fn(value):
   weights usually results in larger impact on model's accuracy.
 
   Args:
-    value: A tensor or variable to be encoded in client to server communication.
+    spec: A `tf.TensorSpec` for the value to be encoded in client to server
+      communication.
 
   Returns:
     A `te.core.GatherEncoder`.
   """
-  # TODO(b/131681951): We cannot use .from_tensor(...) because it does not
-  # currently support Variables.
-  spec = tf.TensorSpec(value.shape, value.dtype)
-  if value.shape.num_elements() > 10000:
+  if spec.shape.num_elements() > 10000:
     if FLAGS.use_sparsity_in_aggregation:
       return te.encoders.as_gather_encoder(
           sparsity.sparse_quantizing_encoder(
@@ -167,88 +145,84 @@ def _mean_encoder_fn(value):
 
 def run_experiment():
   """Data preprocessing and experiment execution."""
-  emnist_train, _ = emnist_dataset.get_federated_datasets(
-      train_client_batch_size=FLAGS.client_batch_size,
-      train_client_epochs_per_round=FLAGS.client_epochs_per_round,
-      only_digits=False)
+  train_client_spec = tff.simulation.baselines.ClientSpec(
+      num_epochs=FLAGS.client_epochs_per_round,
+      batch_size=FLAGS.client_batch_size)
 
-  _, emnist_test = emnist_dataset.get_centralized_datasets()
+  emnist_task = tff.simulation.baselines.emnist.create_character_recognition_task(
+      train_client_spec,
+      model_id=tff.simulation.baselines.emnist.CharacterRecognitionModel.CNN,
+      only_digits=FLAGS.only_digits)
 
-  example_dataset = emnist_train.create_tf_dataset_for_client(
-      emnist_train.client_ids[0])
-  input_spec = example_dataset.element_spec
-
-  client_datasets_fn = training_utils.build_client_datasets_fn(
-      emnist_train, FLAGS.clients_per_round)
-
-  evaluate_fn = training_utils.build_centralized_evaluate_fn(
-      eval_dataset=emnist_test,
-      model_builder=model_builder,
-      loss_builder=loss_builder,
-      metrics_builder=metrics_builder)
-  validation_fn = lambda model_weights, round_num: evaluate_fn(model_weights)
-
-  client_optimizer_fn = functools.partial(
-      utils_impl.create_optimizer_from_flags, 'client')
-  server_optimizer_fn = functools.partial(
-      utils_impl.create_optimizer_from_flags, 'server')
-
-  def tff_model_fn():
-    keras_model = model_builder()
-    return tff.learning.from_keras_model(
-        keras_model,
-        input_spec=input_spec,
-        loss=loss_builder(),
-        metrics=metrics_builder())
+  # Build optimizer functions from flags
+  client_optimizer_fn = optimizer_utils.create_optimizer_fn_from_flags('client')
+  server_optimizer_fn = optimizer_utils.create_optimizer_fn_from_flags('server')
 
   if FLAGS.use_compression:
-    # We create a `MeasuredProcess` for broadcast process and a
-    # `MeasuredProcess` for aggregate process by providing the
-    # `_broadcast_encoder_fn` and `_mean_encoder_fn` to corresponding utilities.
-    # The fns are called once for each of the model weights created by
-    # tff_model_fn, and return instances of appropriate encoders.
+    # We create a `tff.templates.MeasuredProcess` for broadcast process and a
+    # `tff.aggregators.WeightedAggregationFactory` for aggregation by providing
+    # the `_broadcast_encoder_fn` and `_mean_encoder_fn` to corresponding
+    # utilities. The fns are called once for each of the model weights created
+    # by tff_model_fn, and return instances of appropriate encoders.
     encoded_broadcast_process = (
         tff.learning.framework.build_encoded_broadcast_process_from_model(
-            tff_model_fn, _broadcast_encoder_fn))
-    encoded_mean_process = (
-        tff.learning.framework.build_encoded_mean_process_from_model(
-            tff_model_fn, _mean_encoder_fn))
+            emnist_task.model_fn, _broadcast_encoder_fn))
+    aggregator = tff.aggregators.MeanFactory(
+        tff.aggregators.EncodedSumFactory(_mean_encoder_fn))
   else:
     encoded_broadcast_process = None
-    encoded_mean_process = None
+    aggregator = None
 
+  # Construct the iterative process
   iterative_process = tff.learning.build_federated_averaging_process(
-      model_fn=tff_model_fn,
+      model_fn=emnist_task.model_fn,
       client_optimizer_fn=client_optimizer_fn,
       server_optimizer_fn=server_optimizer_fn,
-      aggregation_process=encoded_mean_process,
-      broadcast_process=encoded_broadcast_process)
+      broadcast_process=encoded_broadcast_process,
+      model_update_aggregation_factory=aggregator)
+  emnist_train = emnist_task.datasets.train_data.preprocess(
+      emnist_task.datasets.train_preprocess_fn)
+  training_process = (
+      tff.simulation.compose_dataset_computation_with_iterative_process(
+          emnist_train.dataset_computation, iterative_process))
+
+  training_selection_fn = functools.partial(
+      tff.simulation.build_uniform_sampling_fn(emnist_train.client_ids),
+      size=FLAGS.clients_per_round)
+
+  test_data = emnist_task.datasets.get_centralized_test_data()
+  federated_eval = tff.learning.build_federated_evaluation(emnist_task.model_fn)
+  evaluation_selection_fn = lambda round_num: [test_data]
+
+  def evaluation_fn(state, evaluation_data):
+    return federated_eval(state.model, evaluation_data)
 
   # Log hyperparameters to CSV
   hparam_dict = utils_impl.lookup_flag_values(utils_impl.get_hparam_flags())
-  results_dir = os.path.join(FLAGS.root_output_dir, 'results',
-                             FLAGS.experiment_name)
-  utils_impl.create_directory_if_not_exists(results_dir)
-  hparam_file = os.path.join(results_dir, 'hparams.csv')
-  utils_impl.atomic_write_series_to_csv(hparam_dict, hparam_file)
-
-  training_loop.run(
-      iterative_process=iterative_process,
-      client_datasets_fn=client_datasets_fn,
-      validation_fn=validation_fn,
-      total_rounds=FLAGS.total_rounds,
-      experiment_name=FLAGS.experiment_name,
+  training_utils.write_hparams_to_csv(
+      hparam_dict,
       root_output_dir=FLAGS.root_output_dir,
-      rounds_per_eval=FLAGS.rounds_per_eval,
-      rounds_per_checkpoint=FLAGS.rounds_per_checkpoint,
-      rounds_per_profile=FLAGS.rounds_per_profile)
+      experiment_name=FLAGS.experiment_name)
+
+  program_state_manager, metrics_managers = training_utils.create_managers(
+      FLAGS.root_output_dir, FLAGS.experiment_name)
+  tff.simulation.run_training_process(
+      training_process=training_process,
+      training_selection_fn=training_selection_fn,
+      total_rounds=FLAGS.total_rounds,
+      evaluation_fn=evaluation_fn,
+      evaluation_selection_fn=evaluation_selection_fn,
+      rounds_per_evaluation=FLAGS.rounds_per_eval,
+      program_state_manager=program_state_manager,
+      rounds_per_saving_program_state=FLAGS.rounds_per_checkpoint,
+      metrics_managers=metrics_managers)
 
 
 def main(argv):
   if len(argv) > 1:
     raise app.UsageError('Expected no command-line arguments, '
                          'got: {}'.format(argv))
-  tff.backends.native.set_local_execution_context(max_fanout=25)
+  tff.backends.native.set_local_python_execution_context(max_fanout=25)
   run_experiment()
 
 

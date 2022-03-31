@@ -1,7 +1,5 @@
 load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 
-package(default_visibility = ["//visibility:public"])
-
 licenses(["notice"])
 
 py_test(
@@ -24,10 +22,17 @@ py_binary(
     srcs = ["centralized_trainer.py"],
     python_version = "PY3",
     srcs_version = "PY3",
+    deps = [":centralized_trainer_lib"],
+)
+
+py_library(
+    name = "centralized_trainer_lib",
+    srcs = ["centralized_trainer.py"],
+    srcs_version = "PY3",
     deps = [
         ":centralized_main",
-        "//optimization/shared:optimizer_utils",
         "//utils:utils_impl",
+        "//utils/optimizers:optimizer_utils",
     ],
 )
 
@@ -37,8 +42,8 @@ py_library(
     srcs_version = "PY3",
     deps = [
         ":transformer_models",
-        "//optimization/shared:keras_metrics",
-        "//utils:centralized_training_loop",
+        "//fedopt_guide:centralized_training_loop",
+        "//utils:keras_metrics",
         "//utils/datasets:stackoverflow_word_prediction",
     ],
 )
@@ -50,7 +55,6 @@ py_test(
     srcs_version = "PY3",
     tags = [
         "manual",
-        "nokokoro",
         "nopresubmit",
     ],
     deps = [":centralized_main"],
@@ -63,8 +67,7 @@ py_library(
     deps = [
         ":transformer_models",
         "//fedopt_guide:training_loop",
-        "//optimization/shared:keras_metrics",
-        "//utils:training_utils",
+        "//utils:keras_metrics",
         "//utils/datasets:stackoverflow_word_prediction",
     ],
 )
@@ -79,7 +82,6 @@ py_test(
     srcs_version = "PY3",
     tags = [
         "manual",
-        "nokokoro",
         "nopresubmit",
     ],
     deps = [":federated_main"],
@@ -90,9 +92,16 @@ py_binary(
     srcs = ["federated_trainer.py"],
     python_version = "PY3",
     srcs_version = "PY3",
+    deps = [":federated_trainer_lib"],
+)
+
+py_library(
+    name = "federated_trainer_lib",
+    srcs = ["federated_trainer.py"],
+    srcs_version = "PY3",
     deps = [
         ":federated_main",
-        "//optimization/shared:optimizer_utils",
         "//utils:utils_impl",
+        "//utils/optimizers:optimizer_utils",
     ],
 )

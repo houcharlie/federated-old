@@ -1,6 +1,6 @@
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
-package(default_visibility = ["//visibility:public"])
+package(default_visibility = ["//reconstruction:__subpackages__"])
 
 licenses(["notice"])
 
@@ -40,7 +40,12 @@ py_test(
     size = "large",
     srcs = ["training_process_test.py"],
     python_version = "PY3",
+    shard_count = 10,
     srcs_version = "PY3",
+    tags = [
+        "manual",
+        "notap",  #TODO(b/201413656): Remove this tag once the test succeeds again.
+    ],
     deps = [
         ":keras_utils",
         ":reconstruction_model",

@@ -13,8 +13,7 @@
 # limitations under the License.
 """Library for loading and preprocessing EMNIST training and testing data."""
 
-import collections
-from typing import Tuple, Optional
+from typing import Tuple
 
 import tensorflow as tf
 import tensorflow_federated as tff
@@ -58,7 +57,7 @@ def create_preprocess_fn(
       used when performing `tf.data.Dataset.map`.
 
   Returns:
-    A `tff.Computation` performing the preprocessing discussed above.
+    A callable performing the preprocessing discussed above.
   """
   if num_epochs < 1:
     raise ValueError('num_epochs must be a positive integer.')
@@ -73,19 +72,12 @@ def create_preprocess_fn(
     raise ValueError('emnist_task must be one of "digit_recognition" or '
                      '"autoencoder".')
 
-  # Features are intentionally sorted lexicographically by key for consistency
-  # across datasets.
-  feature_dtypes = collections.OrderedDict(
-      label=tff.TensorType(tf.int32),
-      pixels=tff.TensorType(tf.float32, shape=(28, 28)))
-
-  @tff.tf_computation(tff.SequenceType(feature_dtypes))
   def preprocess_fn(dataset):
     return dataset.shuffle(shuffle_buffer_size).repeat(num_epochs).batch(
         batch_size, drop_remainder=False).map(
             mapping_fn, num_parallel_calls=num_parallel_calls)
 
-  return preprocess_fn
+  return preprocess_fn  # pytype: disable=bad-return-type
 
 
 def get_federated_datasets(
@@ -97,7 +89,8 @@ def get_federated_datasets(
     test_shuffle_buffer_size: int = 1,
     only_digits: bool = False,
     emnist_task: str = 'digit_recognition'
-) -> Tuple[tff.simulation.ClientData, tff.simulation.ClientData]:
+) -> Tuple[tff.simulation.datasets.ClientData,
+           tff.simulation.datasets.ClientData]:
   """Loads and preprocesses federated EMNIST training and testing sets.
 
   Args:
@@ -126,8 +119,8 @@ def get_federated_datasets(
       elements are mapped to tuples of the form (pixels, pixels).
 
   Returns:
-    A tuple (emnist_train, emnist_test) of `tff.simulation.ClientData` instances
-      representing the federated training and test datasets.
+    A tuple (emnist_train, emnist_test) of `tff.simulation.datasets.ClientData`
+    instances representing the federated training and test datasets.
   """
 
   if train_client_epochs_per_round < 1:

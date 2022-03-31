@@ -21,7 +21,6 @@ import tensorflow as tf
 import tensorflow_federated as tff
 
 from fedopt_guide import training_loop
-from utils import training_utils
 from utils.datasets import cifar10_dataset
 from utils.models import resnet_models
 
@@ -116,18 +115,21 @@ def run_federated(
 
   training_process = iterative_process_builder(tff_model_fn, client_weight_fn)
 
-  client_datasets_fn = training_utils.build_client_datasets_fn(
-      dataset=cifar_train,
-      clients_per_round=clients_per_round,
-      random_seed=client_datasets_random_seed)
+  client_datasets_fn = functools.partial(
+      tff.simulation.build_uniform_sampling_fn(
+          dataset=cifar_train.client_ids,
+          random_seed=client_datasets_random_seed),  # pytype: disable=wrong-keyword-args  # gen-stub-imports
+      size=clients_per_round)
 
-  test_fn = training_utils.build_centralized_evaluate_fn(
-      eval_dataset=cifar_test,
-      model_builder=model_builder,
-      loss_builder=loss_builder,
-      metrics_builder=metrics_builder)
+  evaluate_fn = tff.learning.build_federated_evaluation(
+      tff_model_fn, use_experimental_simulation_loop=True)
 
-  validation_fn = lambda model_weights, round_num: test_fn(model_weights)
+  def validation_fn(model_weights, round_num):
+    del round_num
+    return evaluate_fn(model_weights, [cifar_test])
+
+  def test_fn(model_weights):
+    return evaluate_fn(model_weights, [cifar_test])
 
   logging.info('Training model:')
   logging.info(model_builder().summary())

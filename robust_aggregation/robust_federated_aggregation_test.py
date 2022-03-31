@@ -43,7 +43,7 @@ def get_model_fn():
 
   def model_fn():
     keras_model = tf.keras.models.Sequential([
-        tf.keras.layers.Input(shape=(DIM,)),
+        tf.keras.layers.InputLayer(input_shape=(DIM,)),
         tf.keras.layers.Dense(1, kernel_initializer='zeros', use_bias=False)
     ])
     return tff.learning.from_keras_model(
@@ -68,9 +68,9 @@ class DummyClientComputation(tff.learning.framework.ClientDeltaFn):
       client_weight_fn: Optional argument is ignored
     """
     del client_weight_fn
-    self._model = tff.learning.framework.enhance(model)
-    if not isinstance(self._model, tff.learning.framework.EnhancedModel):
-      raise TypeError('Expected `int`, found {}.'.format(type(self._model)))
+    if not isinstance(model, tff.learning.Model):
+      raise TypeError('Expected `int`, found {}.'.format(type(model)))
+    self._model = model
     self._client_weight_fn = None
 
   @property
@@ -103,7 +103,7 @@ class DummyClientComputation(tff.learning.framework.ClientDeltaFn):
     # containing a mean of all the examples in the local dataset. Note: this
     # works for a linear model only (as in the example above)
     weights_delta = [example_vector_sum / tf.cast(num_examples_sum, tf.float32)]
-    aggregated_outputs = model.report_local_outputs()
+    aggregated_outputs = model.report_local_unfinalized_metrics()
     weights_delta, has_non_finite_delta = (
         tensor_utils.zero_all_if_any_non_finite(weights_delta))
     weights_delta_weight = tf.cast(num_examples_sum, tf.float32)
@@ -138,19 +138,13 @@ def build_federated_process_for_test(model_fn, num_passes=5, tolerance=1e-6):
     return DummyClientComputation(model_fn(), client_weight_fn=None)
 
   # Build robust aggregation function
-  with tf.Graph().as_default():
-    # workaround since keras automatically appends "_n" to the nth call of
-    # `model_fn`
-    model_type = tff.framework.type_from_tensors(model_fn().weights.trainable)
-
-    aggregate_fn = rfa.build_stateless_robust_aggregation(
-        model_type, num_communication_passes=num_passes, tolerance=tolerance)
-
-    return tff.learning.framework.build_model_delta_optimizer_process(
-        model_fn,
-        client_fed_avg,
-        server_optimizer_fn,
-        aggregation_process=aggregate_fn)
+  aggregator = rfa.RobustWeiszfeldFactory(
+      num_communication_passes=num_passes, tolerance=tolerance)
+  return tff.learning.framework.build_model_delta_optimizer_process(
+      model_fn,
+      client_fed_avg,
+      server_optimizer_fn,
+      model_update_aggregation_factory=aggregator)
 
 
 def get_mean(dataset):

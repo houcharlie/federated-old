@@ -13,7 +13,9 @@
 # limitations under the License.
 """Federated experiments on the Google Landmark dataset using TFF."""
 
+import functools
 from typing import Callable, Optional
+
 from absl import logging
 import tensorflow as tf
 import tensorflow_federated as tff
@@ -21,7 +23,6 @@ import tensorflow_federated as tff
 from fedopt_guide import training_loop
 from fedopt_guide.gld23k_mobilenet import dataset
 from fedopt_guide.gld23k_mobilenet import mobilenet_v2
-from utils import training_utils
 
 
 def run_federated(
@@ -150,20 +151,25 @@ def run_federated(
   else:
     trainer.get_model_weights = training_process.get_model_weights
 
-  client_ids_fn = training_utils.build_sample_fn(
-      train_data.client_ids,
-      size=clients_per_round,
-      replace=False,
-      random_seed=client_datasets_random_seed)
+  client_ids_fn = functools.partial(
+      tff.simulation.build_uniform_sampling_fn(
+          train_data.client_ids,
+          replace=False,
+          random_seed=client_datasets_random_seed),
+      size=clients_per_round)
   # We convert the output to a list (instead of an np.ndarray) so that it can
   # be used as input to the iterative process.
   client_ids_fn_as_list = lambda x: list(client_ids_fn(x))
 
-  evaluate_fn = training_utils.build_centralized_evaluate_fn(
-      model_builder=model_builder,
-      eval_dataset=test_data,
-      loss_builder=loss_builder,
-      metrics_builder=metrics_builder)
+  evaluate_fn = tff.learning.build_federated_evaluation(
+      model_fn, use_experimental_simulation_loop=True)
+
+  def validation_fn(model_weights, round_num):
+    del round_num
+    return evaluate_fn(model_weights, [test_data])
+
+  def test_fn(model_weights):
+    return evaluate_fn(model_weights, [test_data])
 
   logging.info('Training model:')
   logging.info(model_builder().summary())
@@ -171,8 +177,8 @@ def run_federated(
   training_loop.run(
       iterative_process=trainer,
       train_client_datasets_fn=client_ids_fn_as_list,
-      evaluation_fn=lambda model, _: evaluate_fn(model),
-      test_fn=evaluate_fn,
+      evaluation_fn=validation_fn,
+      test_fn=test_fn,
       total_rounds=total_rounds,
       experiment_name=experiment_name,
       root_output_dir=root_output_dir,

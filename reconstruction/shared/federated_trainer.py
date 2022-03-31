@@ -23,7 +23,6 @@ from absl import flags
 import tensorflow as tf
 import tensorflow_federated as tff
 
-from optimization.shared import optimizer_utils
 from reconstruction import evaluation_computation
 from reconstruction import reconstruction_model
 from reconstruction import reconstruction_utils
@@ -33,6 +32,7 @@ from reconstruction.shared import federated_evaluation
 from reconstruction.shared import federated_trainer_utils
 from reconstruction.stackoverflow import federated_stackoverflow
 from utils import utils_impl
+from utils.optimizers import optimizer_utils
 
 _SUPPORTED_TASKS = [
     'stackoverflow_nwp', 'movielens_mf', 'stackoverflow_nwp_finetune'
@@ -297,7 +297,7 @@ def _write_hparam_flags():
 
   results_dir = os.path.join(FLAGS.root_output_dir, 'results',
                              FLAGS.experiment_name)
-  utils_impl.create_directory_if_not_exists(results_dir)
+  tf.io.gfile.makedirs(results_dir)
   hparam_file = os.path.join(results_dir, 'hparams.csv')
   utils_impl.atomic_write_series_to_csv(hparam_dict, hparam_file)
 
@@ -425,7 +425,7 @@ def main(argv):
                                                           client_learning_rate),
           dataset_split_fn=fake_dataset_split_fn,
           client_weight_fn=client_weighting,
-          aggregation_factory=aggregation_factory)
+          aggregation_factory=aggregation_factory)  # pytype: disable=wrong-arg-types  # typed-keras
 
     return training_process.build_federated_reconstruction_process(
         model_fn=model_fn,
@@ -447,7 +447,7 @@ def main(argv):
         evaluate_reconstruction=FLAGS.evaluate_reconstruction,
         jointly_train_variables=FLAGS.jointly_train_variables,
         client_weight_fn=client_weighting,
-        aggregation_factory=aggregation_factory)
+        aggregation_factory=aggregation_factory)  # pytype: disable=wrong-arg-types  # typed-keras
 
   def evaluation_computation_builder(
       model_fn: Callable[[], reconstruction_model.ReconstructionModel],

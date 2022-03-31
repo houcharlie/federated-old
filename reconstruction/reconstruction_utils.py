@@ -95,9 +95,8 @@ def build_dataset_split_fn(recon_epochs_max: int = 1,
       client data after reconstruction.
     post_recon_steps_max: If not None, the integer maximum number of steps
       (batches) to iterate through after reconstruction. This maximum number of
-      steps is across all reconstruction iterations, i.e. it is applied after
-      `recon_epochs_max` and `recon_epochs_constant`. If None, this has no
-      effect.
+      steps is across all post-reconstruction iterations, i.e. it is applied
+      after `post_recon_epochs`. If None, this has no effect.
     split_dataset: If True, splits `client_dataset` in half for each user, using
       even-indexed entries in reconstruction and odd-indexed entries after
       reconstruction. If False, `client_dataset` is used for both reconstruction
@@ -117,7 +116,6 @@ def build_dataset_split_fn(recon_epochs_max: int = 1,
   post_recon_condition = lambda i, entry: tf.greater(tf.math.floormod(i, 2), 0)
   get_entry = lambda i, entry: entry
 
-  @tf.function
   def dataset_split_fn(
       client_dataset: tf.data.Dataset,
       round_num: tf.Tensor) -> Tuple[tf.data.Dataset, tf.data.Dataset]:

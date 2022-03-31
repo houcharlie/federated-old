@@ -22,8 +22,8 @@ import tensorflow_federated as tff
 
 from fedopt_guide.gld23k_mobilenet import dataset
 from fedopt_guide.gld23k_mobilenet import federated_main
-from optimization.shared import optimizer_utils
 from utils import utils_impl
+from utils.optimizers import optimizer_utils
 
 with utils_impl.record_hparam_flags() as optimizer_flags:
   # Defining optimizer flags
@@ -107,9 +107,9 @@ def main(argv):
     Args:
       model_fn: A no-arg function returning a `tff.learning.Model`.
       client_weight_fn: Optional function that takes the output of
-        `model.report_local_outputs` and returns a tensor providing the weight
-        in the federated average of model deltas. If not provided, the default
-        is the total number of examples processed on device.
+        `model.report_local_unfinalized_metrics` and returns a tensor providing
+        the weight in the federated average of model deltas. If not provided,
+        the default is the total number of examples processed on device.
 
     Returns:
       A `tff.templates.IterativeProcess`.
