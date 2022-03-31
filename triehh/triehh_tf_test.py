@@ -107,10 +107,7 @@ class TriehhTfTest(hh_test.HeavyHittersTest):
                                       dtype=tf.string)
     round_num = tf.constant(1)
     num_sub_rounds = tf.constant(1)
-    # Force an empty dataset that yields tf.string. Using `from_tensor_slices`
-    # defaults to yielding tf.int32 values.
-    sample_data = tf.data.Dataset.from_generator(
-        generator=lambda: iter(()), output_types=tf.string, output_shapes=())
+    sample_data = tf.data.Dataset.from_tensor_slices(['test']).take(0)
     client_output = triehh_tf.client_update(
         sample_data, discovered_prefixes, possible_prefix_extensions, round_num,
         num_sub_rounds, max_num_prefixes, max_user_contribution,
@@ -692,9 +689,8 @@ class TriehhTfTest(hh_test.HeavyHittersTest):
 
     client_ids = list(range(100))
 
-    client_data = tff.simulation.ClientData.from_clients_and_fn(
-        client_ids=client_ids,
-        create_tf_dataset_for_client_fn=create_dataset_fn)
+    client_data = tff.simulation.datasets.ClientData.from_clients_and_tf_fn(
+        client_ids=client_ids, serializable_dataset_fn=create_dataset_fn)
 
     for round_num in range(max_rounds * num_sub_rounds):
       sampled_clients = list(range(clients))
@@ -766,9 +762,8 @@ class TriehhTfTest(hh_test.HeavyHittersTest):
 
     client_ids = list(range(100))
 
-    client_data = tff.simulation.ClientData.from_clients_and_fn(
-        client_ids=client_ids,
-        create_tf_dataset_for_client_fn=create_dataset_fn)
+    client_data = tff.simulation.datasets.ClientData.from_clients_and_tf_fn(
+        client_ids=client_ids, serializable_dataset_fn=create_dataset_fn)
 
     for round_num in range(max_rounds * num_sub_rounds):
       sampled_clients = list(range(clients))

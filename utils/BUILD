@@ -5,76 +5,57 @@ package(default_visibility = ["//visibility:public"])
 licenses(["notice"])
 
 py_library(
-    name = "aggregate_fns",
-    srcs = ["aggregate_fns.py"],
+    name = "keras_metrics",
+    srcs = ["keras_metrics.py"],
     srcs_version = "PY3",
 )
 
 py_test(
-    name = "aggregate_fns_test",
-    srcs = ["aggregate_fns_test.py"],
+    name = "keras_metrics_test",
+    size = "small",
+    srcs = ["keras_metrics_test.py"],
     python_version = "PY3",
     srcs_version = "PY3",
-    deps = [":aggregate_fns"],
+    deps = [":keras_metrics"],
 )
 
 py_library(
-    name = "centralized_training_loop",
-    srcs = ["centralized_training_loop.py"],
+    name = "task_utils",
+    srcs = ["task_utils.py"],
     srcs_version = "PY3",
-    deps = [
-        ":utils_impl",
-        "//optimization/shared:keras_callbacks",
-    ],
 )
 
 py_test(
-    name = "centralized_training_loop_test",
-    srcs = ["centralized_training_loop_test.py"],
+    name = "task_utils_test",
+    srcs = ["task_utils_test.py"],
     python_version = "PY3",
     srcs_version = "PY3",
-    deps = [":centralized_training_loop"],
+    deps = [":task_utils"],
 )
 
 py_library(
-    name = "checkpoint_utils",
-    srcs = ["checkpoint_utils.py"],
+    name = "tensor_utils",
+    srcs = ["tensor_utils.py"],
     srcs_version = "PY3",
 )
 
 py_test(
-    name = "checkpoint_utils_test",
-    size = "large",
-    srcs = ["checkpoint_utils_test.py"],
+    name = "tensor_utils_test",
+    srcs = ["tensor_utils_test.py"],
     python_version = "PY3",
     srcs_version = "PY3",
-    deps = [":checkpoint_utils"],
-)
-
-py_library(
-    name = "training_loop",
-    srcs = ["training_loop.py"],
-    srcs_version = "PY3",
-)
-
-py_test(
-    name = "training_loop_test",
-    size = "large",
-    srcs = ["training_loop_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
-    deps = [":training_loop"],
+    deps = [":tensor_utils"],
 )
 
 py_library(
     name = "training_utils",
     srcs = ["training_utils.py"],
     srcs_version = "PY3",
+    deps = [":utils_impl"],
 )
 
 py_test(
     name = "training_utils_test",
-    size = "large",
     srcs = ["training_utils_test.py"],
     python_version = "PY3",
     srcs_version = "PY3",
@@ -87,24 +68,10 @@ py_library(
     srcs_version = "PY3",
 )
 
-py_library(
-    name = "tensor_utils",
-    srcs = ["tensor_utils.py"],
-    srcs_version = "PY3",
-)
-
 py_test(
     name = "utils_impl_test",
     srcs = ["utils_impl_test.py"],
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [":utils_impl"],
-)
-
-py_test(
-    name = "tensor_utils_test",
-    srcs = ["tensor_utils_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
-    deps = [":tensor_utils"],
 )

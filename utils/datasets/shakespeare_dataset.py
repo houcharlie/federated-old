@@ -13,8 +13,7 @@
 # limitations under the License.
 """Libraries to prepare Shakespeare datasets for CharRNN experiments."""
 
-import collections
-from typing import Optional, Tuple
+from typing import Callable, Tuple
 
 import tensorflow as tf
 import tensorflow_federated as tff
@@ -88,7 +87,8 @@ def create_preprocess_fn(
     batch_size: int,
     shuffle_buffer_size: int = 50,
     sequence_length: int = SEQUENCE_LENGTH,
-    num_parallel_calls: int = tf.data.experimental.AUTOTUNE) -> tff.Computation:
+    num_parallel_calls: int = tf.data.experimental.AUTOTUNE
+) -> Callable[[tf.data.Dataset], tf.data.Dataset]:
   """Creates a preprocessing function for Shakespeare client datasets.
 
   This function maps a dataset of string snippets to a dataset of input/output
@@ -108,7 +108,7 @@ def create_preprocess_fn(
       used when performing `tf.data.Dataset.map`.
 
   Returns:
-    A `tff.Computation` performing the preprocessing described above.
+    A callable performing the preprocessing described above.
   """
   if num_epochs < 1:
     raise ValueError('num_epochs must be a positive integer.')
@@ -117,9 +117,6 @@ def create_preprocess_fn(
   if shuffle_buffer_size <= 1:
     shuffle_buffer_size = 1
 
-  feature_dtypes = collections.OrderedDict(snippets=tf.string,)
-
-  @tff.tf_computation(tff.SequenceType(feature_dtypes))
   def preprocess_fn(dataset):
     to_tokens = _build_tokenize_fn(split_length=sequence_length + 1)
     return (
@@ -148,7 +145,8 @@ def get_federated_datasets(
     train_shuffle_buffer_size: int = 50,
     test_shuffle_buffer_size: int = 1,
     sequence_length: int = SEQUENCE_LENGTH
-) -> Tuple[tff.simulation.ClientData, tff.simulation.ClientData]:
+) -> Tuple[tff.simulation.datasets.ClientData,
+           tff.simulation.datasets.ClientData]:
   """Loads and preprocesses federated Shakespeare datasets.
 
   Args:
@@ -171,8 +169,9 @@ def get_federated_datasets(
       client datasets.
 
   Returns:
-    A tuple (shakespeare_train, shakespeare_test) of `tff.simulation.ClientData`
-    instances representing the federated training and test datasets.
+    A tuple (shakespeare_train, shakespeare_test) of
+    `tff.simulation.datasets.ClientData` instances representing the federated
+    training and test datasets.
   """
   if train_client_epochs_per_round < 1:
     raise ValueError(
@@ -205,12 +204,11 @@ def get_federated_datasets(
 
 
 def get_centralized_datasets(
-    train_batch_size: Optional[int] = 20,
-    test_batch_size: Optional[int] = 100,
-    train_shuffle_buffer_size: Optional[int] = 1000,
-    test_shuffle_buffer_size: Optional[int] = 1,
-    sequence_length: Optional[int] = SEQUENCE_LENGTH,
-    cache_dir: Optional[str] = None
+    train_batch_size: int = 20,
+    test_batch_size: int = 100,
+    train_shuffle_buffer_size: int = 1000,
+    test_shuffle_buffer_size: int = 1,
+    sequence_length: int = SEQUENCE_LENGTH
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
   """Loads and preprocesses centralized Shakespeare datasets.
 

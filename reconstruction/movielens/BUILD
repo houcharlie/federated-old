@@ -4,7 +4,7 @@ load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 licenses(["notice"])
 
-package(default_visibility = ["//visibility:public"])
+package(default_visibility = ["//reconstruction:__subpackages__"])
 
 py_library(
     name = "models",
@@ -51,6 +51,6 @@ py_library(
         ":models",
         ":movielens_dataset",
         "//reconstruction/shared:federated_trainer_utils",
-        "//utils:training_loop",
+        "//utils:training_utils",
     ],
 )

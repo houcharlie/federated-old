@@ -2,7 +2,7 @@ load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 
 licenses(["notice"])
 
-package(default_visibility = ["//visibility:public"])
+package(default_visibility = ["//reconstruction:__subpackages__"])
 
 py_binary(
     name = "federated_trainer",
@@ -12,7 +12,6 @@ py_binary(
     deps = [
         ":federated_evaluation",
         ":federated_trainer_utils",
-        "//optimization/shared:optimizer_utils",
         "//reconstruction:evaluation_computation",
         "//reconstruction:reconstruction_model",
         "//reconstruction:reconstruction_utils",
@@ -20,6 +19,7 @@ py_binary(
         "//reconstruction/movielens:federated_movielens",
         "//reconstruction/stackoverflow:federated_stackoverflow",
         "//utils:utils_impl",
+        "//utils/optimizers:optimizer_utils",
     ],
 )
 
@@ -71,7 +71,6 @@ py_test(
     srcs_version = "PY3",
     tags = [
         "manual",
-        "nokokoro",
         "nopresubmit",
     ],
     deps = [

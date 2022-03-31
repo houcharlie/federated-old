@@ -13,8 +13,7 @@
 # limitations under the License.
 """Data loader for Stack Overflow next-word-prediction tasks."""
 
-import collections
-from typing import Callable, List, Tuple, Optional
+from typing import Callable, Mapping, List, Tuple
 
 import attr
 import numpy as np
@@ -42,8 +41,9 @@ class SpecialTokens(object):
 
 def create_vocab(vocab_size: int) -> List[str]:
   """Creates vocab from `vocab_size` most common words in Stackoverflow."""
-  vocab_dict = tff.simulation.datasets.stackoverflow.load_word_counts()
-  return list(vocab_dict.keys())[:vocab_size]
+  return list(
+      tff.simulation.datasets.stackoverflow.load_word_counts(
+          vocab_size=vocab_size).keys())
 
 
 def split_input_target(chunk: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
@@ -65,7 +65,7 @@ def split_input_target(chunk: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
 def build_to_ids_fn(
     vocab: List[str],
     max_sequence_length: int,
-    num_oov_buckets: int = 1) -> Callable[[tf.Tensor], tf.Tensor]:
+    num_oov_buckets: int = 1) -> Callable[[Mapping[str, tf.Tensor]], tf.Tensor]:
   """Constructs function mapping examples to sequences of token indices."""
   special_tokens = get_special_tokens(len(vocab), num_oov_buckets)
   bos = special_tokens.bos
@@ -76,8 +76,7 @@ def build_to_ids_fn(
       tf.lookup.KeyValueTensorInitializer(vocab, table_values),
       num_oov_buckets=num_oov_buckets)
 
-  def to_ids(example):
-
+  def to_ids(example: Mapping[str, tf.Tensor]) -> tf.Tensor:
     sentence = tf.reshape(example['tokens'], shape=[1])
     words = tf.strings.split(sentence, sep=' ').values
     truncated_words = words[:max_sequence_length]
@@ -115,7 +114,8 @@ def create_preprocess_fn(
     client_epochs_per_round: int,
     max_sequence_length: int,
     max_elements_per_client: int,
-    max_shuffle_buffer_size: int = 10000) -> tff.Computation:
+    max_shuffle_buffer_size: int = 10000
+) -> Callable[[tf.data.Dataset], tf.data.Dataset]:
   """Creates a preprocessing functions for Stack Overflow next-word-prediction.
 
   This function returns a `tff.Computation` which takes a dataset and returns a
@@ -139,7 +139,7 @@ def create_preprocess_fn(
     max_shuffle_buffer_size: Maximum shuffle buffer size.
 
   Returns:
-    A `tff.Computation` taking as input a `tf.data.Dataset`, and returning a
+    A callable taking as input a `tf.data.Dataset`, and returning a
     `tf.data.Dataset` formed by preprocessing according to the input arguments.
   """
   if client_batch_size <= 0:
@@ -165,18 +165,6 @@ def create_preprocess_fn(
   else:
     shuffle_buffer_size = max_elements_per_client
 
-  # Features are intentionally sorted lexicographically by key for consistency
-  # across datasets.
-  feature_dtypes = collections.OrderedDict(
-      creation_date=tf.string,
-      score=tf.int64,
-      tags=tf.string,
-      title=tf.string,
-      tokens=tf.string,
-      type=tf.string,
-  )
-
-  @tff.tf_computation(tff.SequenceType(feature_dtypes))
   def preprocess_fn(dataset):
     to_ids = build_to_ids_fn(
         vocab=vocab,
@@ -201,8 +189,9 @@ def get_federated_datasets(
     max_elements_per_train_client: int = 1000,
     max_elements_per_test_client: int = -1,
     train_shuffle_buffer_size: int = 10000,
-    test_shuffle_buffer_size: int = 1
-) -> Tuple[tff.simulation.ClientData, tff.simulation.ClientData]:
+    test_shuffle_buffer_size: int = 1,
+) -> Tuple[tff.simulation.datasets.ClientData,
+           tff.simulation.datasets.ClientData]:
   """Loads federated Stack Overflow next-word prediction datasets.
 
   This function ignores the heldout Stack Overflow dataset for consistency with
@@ -238,8 +227,8 @@ def get_federated_datasets(
 
   Returns:
     A tuple (stackoverflow_train, stackoverflow_test) of
-    `tff.simulation.ClientData` instances representing the federated training
-    and test datasets.
+    `tff.simulation.datasets.ClientData` instances representing the federated
+    training and test datasets.
   """
   if vocab_size <= 0:
     raise ValueError('vocab_size must be a positive integer; you have '
@@ -301,8 +290,10 @@ def get_centralized_datasets(
     train_batch_size: The batch size for the training dataset.
     validation_batch_size: The batch size for the validation dataset.
     test_batch_size: The batch size for the test dataset.
-    num_validation_examples: Number of examples from Stackoverflow test set to
-      use for validation on each round.
+    num_validation_examples: Number of examples from Stackoverflow validation
+      set to use for validation on each round. If set to -1, we use the entire
+      dataset. Note that this occurs before shuffling, and is therefore not a
+      random sample of examples.
     train_shuffle_buffer_size: The shuffle buffer size for the training dataset.
       If set to a number <= 1, no shuffling occurs.
     validation_shuffle_buffer_size: The shuffle buffer size for the validation
@@ -347,16 +338,17 @@ def get_centralized_datasets(
       max_elements_per_client=-1,
       max_shuffle_buffer_size=test_shuffle_buffer_size)
 
-  raw_train, _, raw_test = tff.simulation.datasets.stackoverflow.load_data(cache_dir=cache_dir)
+  raw_train, raw_validation, raw_test = (
+      tff.simulation.datasets.stackoverflow.load_data())
   stackoverflow_train = raw_train.create_tf_dataset_from_all_clients()
   stackoverflow_train = train_preprocess_fn(stackoverflow_train)
 
-  test_and_val_dataset = raw_test.create_tf_dataset_from_all_clients()
-
-  stackoverflow_validation = test_and_val_dataset.take(num_validation_examples)
+  stackoverflow_validation = raw_validation.create_tf_dataset_from_all_clients()
+  stackoverflow_validation = stackoverflow_validation.take(
+      num_validation_examples)
   stackoverflow_validation = validation_preprocess_fn(stackoverflow_validation)
 
-  stackoverflow_test = test_and_val_dataset.skip(num_validation_examples)
+  stackoverflow_test = raw_test.create_tf_dataset_from_all_clients()
   stackoverflow_test = test_preprocess_fn(stackoverflow_test)
 
   return stackoverflow_train, stackoverflow_validation, stackoverflow_test

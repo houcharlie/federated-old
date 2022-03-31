@@ -14,7 +14,7 @@
 """Federated MovieLens matrix factorization runner library."""
 
 import functools
-import os
+import os.path
 from typing import Callable, List, Optional
 
 from absl import logging
@@ -23,7 +23,7 @@ import tensorflow_federated as tff
 from reconstruction.movielens import models
 from reconstruction.movielens import movielens_dataset
 from reconstruction.shared import federated_trainer_utils
-from utils import training_loop
+from utils import training_utils
 
 
 def run_federated(
@@ -51,7 +51,8 @@ def run_federated(
     total_rounds: int,
     experiment_name: Optional[str] = 'federated_ml_mf',
     root_output_dir: Optional[str] = '/tmp/fed_recon',
-    **kwargs):
+    rounds_per_eval: int = 1,
+    rounds_per_checkpoint: int = 50):
   """Runs an iterative process on the MovieLens matrix factorization task.
 
   This method will load and pre-process dataset and construct a model used for
@@ -128,8 +129,10 @@ def run_federated(
       to the `root_output_dir` for purposes of writing outputs.
     root_output_dir: The name of the root output directory for writing
       experiment outputs.
-    **kwargs: Additional arguments configuring the training loop. For details on
-      supported arguments, see training_loop.py`.
+    rounds_per_eval: How often to compute validation metrics.
+    rounds_per_checkpoint: How often to checkpoint the iterative process state.
+      If you expect the job to restart frequently, this should be small. If no
+      interruptions are expected, this can be made larger.
   """
 
   logging.info('Copying MovieLens data.')
@@ -238,21 +241,29 @@ def run_federated(
       tf_test_datasets, clients_per_round=clients_per_round)
 
   # Create final evaluation functions to pass to `training_loop`.
-  val_fn = federated_trainer_utils.build_eval_fn(
-      evaluation_computation=evaluation_computation,
-      client_datasets_fn=val_client_datasets_fn)
+  def val_fn(state, sampled_data):
+    model = training_process.get_model_weights(state)
+    return evaluation_computation(model, sampled_data)
+
   test_fn = federated_trainer_utils.build_eval_fn(
       evaluation_computation=evaluation_computation,
-      client_datasets_fn=test_client_datasets_fn)
+      client_datasets_fn=test_client_datasets_fn,
+      get_model=training_process.get_model_weights)  # pytype: disable=attribute-error  # gen-stub-imports
   test_fn = functools.partial(test_fn, round_num=0)
 
-  logging.info('Starting training loop.')
-  training_loop.run(
-      iterative_process=training_process,
-      client_datasets_fn=train_client_datasets_fn,
-      validation_fn=val_fn,
-      test_fn=test_fn,
+  program_state_manager, metrics_managers = training_utils.create_managers(
+      root_output_dir, experiment_name)
+  state = tff.simulation.run_training_process(
+      training_process=training_process,
+      training_selection_fn=train_client_datasets_fn,
       total_rounds=total_rounds,
-      experiment_name=experiment_name,
-      root_output_dir=root_output_dir,
-      **kwargs)
+      evaluation_fn=val_fn,
+      evaluation_selection_fn=val_client_datasets_fn,
+      rounds_per_evaluation=rounds_per_eval,
+      program_state_manager=program_state_manager,
+      rounds_per_saving_program_state=rounds_per_checkpoint,
+      metrics_managers=metrics_managers)
+
+  test_metrics = test_fn(state)
+  for metrics_manager in metrics_managers:
+    metrics_manager.release(test_metrics, total_rounds + 1)

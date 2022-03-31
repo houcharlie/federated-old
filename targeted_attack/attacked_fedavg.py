@@ -32,6 +32,7 @@ How To Back door Federated Learning
 """
 
 import collections
+from typing import Any, Callable, OrderedDict
 
 import attr
 import tensorflow as tf
@@ -48,8 +49,8 @@ class ClientOutput(object):
   -   `weights_delta_weight`: Weight to be used in a weighted mean when
       aggregating `weights_delta`.
   -   `model_output`: A structure matching
-      `tff.learning.Model.report_local_outputs`, reflecting the results of
-      training on the input dataset.
+      `tff.learning.Model.report_local_unfinalized_metrics`, reflecting the
+      results of training on the input dataset.
   -   `optimizer_output`: Additional metrics or other outputs defined by the
       optimizer.
   """
@@ -124,7 +125,7 @@ def server_update(model, server_optimizer, server_optimizer_vars, server_state,
       tf.nest.flatten(model_weights.trainable))
   server_optimizer.apply_gradients(grads_and_vars, name='server_update')
 
-  return tff.utils.update_state(
+  return tff.structure.update_struct(
       server_state,
       model=model_weights,
       optimizer_state=server_optimizer_vars,
@@ -184,16 +185,15 @@ class ClientExplicitBoosting:
                                                    model_weights.trainable,
                                                    initial_weights.trainable)
 
-      aggregated_outputs = model.report_local_outputs()
+      aggregated_outputs = model.report_local_unfinalized_metrics()
 
       return weights_delta_benign, aggregated_outputs, num_examples_sum
 
     @tf.function
     def compute_malicious_update():
       """compute malicious update sent back to the server."""
-
-      weights_delta_benign, aggregated_outputs, num_examples_sum \
-          = compute_benign_update()
+      result = compute_benign_update()
+      weights_delta_benign, aggregated_outputs, num_examples_sum = result
 
       tf.nest.map_structure(lambda a, b: a.assign(b), model_weights,
                             initial_weights)
@@ -351,9 +351,9 @@ def build_client_update_fn(model_fn, optimizer_fn, client_update_tf,
 
 def build_run_one_round_fn_attacked(server_update_fn, client_update_fn,
                                     aggregation_process,
-                                    dummy_model_for_metadata,
                                     federated_server_state_type,
-                                    federated_dataset_type):
+                                    federated_dataset_type,
+                                    metrics_aggregation_computation):
   """Builds a `tff.federated_computation` for a round of training.
 
   Args:
@@ -361,9 +361,14 @@ def build_run_one_round_fn_attacked(server_update_fn, client_update_fn,
     client_update_fn: A function for updates in the clients.
     aggregation_process: A 'tff.templates.AggregationProcess' that takes in
       model deltas placed@CLIENTS to an aggregated model delta placed@SERVER.
-    dummy_model_for_metadata: A dummy `tff.learning.Model`.
     federated_server_state_type: type_signature of federated server state.
     federated_dataset_type: type_signature of federated dataset.
+    metrics_aggregation_computation: A federated TFF computation that takes in
+      the metric finalizers (i.e., `tff.learning.Model.metric_finalizers()`) and
+      a `tff.types.StructWithPythonType` of the unfinalized metrics (i.e., the
+      TFF type of `tff.learning.Model.report_local_unfinalized_metrics()`), with
+      the following type signature `local_unfinalized_metrics@CLIENTS ->
+      aggregated_metrics@SERVER`.
 
   Returns:
     A `tff.federated_computation` for a round of training.
@@ -386,8 +391,7 @@ def build_run_one_round_fn_attacked(server_update_fn, client_update_fn,
       malicious_clients: A federated `tf.bool` with placement `tff.CLIENTS`.
 
     Returns:
-      A tuple of updated `ServerState` and the result of
-      `tff.learning.Model.federated_output_computation`.
+      A tuple of updated `ServerState` and the result of aggregated metrics.
     """
 
     client_model = tff.federated_broadcast(server_state.model)
@@ -398,10 +402,7 @@ def build_run_one_round_fn_attacked(server_update_fn, client_update_fn,
 
     weight_denom = client_outputs.weights_delta_weight
 
-    # If the aggregation process' next function takes three arguments it is
-    # weighted, otherwise, unweighted. Unfortunately there is no better way
-    # to determine this.
-    if len(aggregation_process.next.type_signature.parameter) == 3:
+    if aggregation_process.is_weighted:
       aggregate_output = aggregation_process.next(
           server_state.delta_aggregate_state,
           client_outputs.weights_delta,
@@ -416,7 +417,7 @@ def build_run_one_round_fn_attacked(server_update_fn, client_update_fn,
         server_update_fn,
         (server_state, round_model_delta, new_delta_aggregate_state))
 
-    aggregated_outputs = dummy_model_for_metadata.federated_output_computation(
+    aggregated_outputs = metrics_aggregation_computation(
         client_outputs.model_output)
     if isinstance(aggregated_outputs.type_signature, tff.StructType):
       aggregated_outputs = tff.federated_zip(aggregated_outputs)
@@ -430,8 +431,11 @@ def build_federated_averaging_process_attacked(
     model_fn,
     client_optimizer_fn=lambda: tf.keras.optimizers.SGD(learning_rate=0.1),
     server_optimizer_fn=lambda: tf.keras.optimizers.SGD(learning_rate=1.0),
-    aggregation_process=None,
-    client_update_tf=ClientExplicitBoosting(boost_factor=1.0)):
+    model_update_aggregation_factory=None,
+    client_update_tf=ClientExplicitBoosting(boost_factor=1.0),
+    metrics_aggregator: Callable[[
+        OrderedDict[str, Callable[[Any], Any]], tff.types.StructWithPythonType
+    ], tff.Computation] = tff.learning.metrics.sum_then_finalize):
   """Builds the TFF computations for optimization using federated averaging with potentially malicious clients.
 
   Args:
@@ -440,21 +444,44 @@ def build_federated_averaging_process_attacked(
       `tf.keras.optimizers.Optimizer`, use during local client training.
     server_optimizer_fn: A no-arg function that returns a
       `tf.keras.optimizers.Optimizer`, use to apply updates to the global model.
-    aggregation_process: A 'tff.templates.MeasuredProcess' that aggregates model
-      deltas placed@CLIENTS to an aggregated model delta placed@SERVER.
+    model_update_aggregation_factory: An optional
+      `tff.aggregators.AggregationFactory` that contstructs
+      `tff.templates.AggregationProcess` for aggregating the client model
+      updates on the server. If `None`, uses a default constructed
+      `tff.aggregators.MeanFactory`, creating a stateless mean aggregation.
     client_update_tf: a 'tf.function' computes the ClientOutput.
+    metrics_aggregator: A function that takes in the metric finalizers (i.e.,
+      `tff.learning.Model.metric_finalizers()`) and a
+      `tff.types.StructWithPythonType` of the unfinalized metrics (i.e., the TFF
+      type of `tff.learning.Model.report_local_unfinalized_metrics()`), and
+      returns a federated TFF computation of the following type signature
+      `local_unfinalized_metrics@CLIENTS -> aggregated_metrics@SERVER`. Default
+      is `tff.learning.metrics.sum_then_finalize`, which returns a federated TFF
+      computation that sums the unfinalized metrics from `CLIENTS`, and then
+      applies the corresponding metric finalizers at `SERVER`.
 
   Returns:
     A `tff.templates.IterativeProcess`.
   """
   with tf.Graph().as_default():
-    dummy_model_for_metadata = model_fn()
+    fake_model_for_metadata = model_fn()
     weights_type = tff.learning.framework.weights_type_from_model(
-        dummy_model_for_metadata)
+        fake_model_for_metadata)
+    unfinalized_metrics_type = tff.types.type_from_tensors(
+        fake_model_for_metadata.report_local_unfinalized_metrics())
+    metrics_aggregation_computation = metrics_aggregator(
+        fake_model_for_metadata.metric_finalizers(), unfinalized_metrics_type)
 
-  if aggregation_process is None:
-    aggregation_process = tff.learning.framework.build_stateless_mean(
-        model_delta_type=weights_type.trainable)
+  if model_update_aggregation_factory is None:
+    model_update_aggregation_factory = tff.aggregators.MeanFactory()
+
+  if isinstance(model_update_aggregation_factory,
+                tff.aggregators.WeightedAggregationFactory):
+    aggregation_process = model_update_aggregation_factory.create(
+        weights_type.trainable, tff.TensorType(tf.float32))
+  else:
+    aggregation_process = model_update_aggregation_factory.create(
+        weights_type.trainable)
 
   server_init = build_server_init_fn(model_fn, server_optimizer_fn,
                                      aggregation_process.initialize)
@@ -462,7 +489,7 @@ def build_federated_averaging_process_attacked(
   server_update_fn = build_server_update_fn(model_fn, server_optimizer_fn,
                                             server_state_type,
                                             server_state_type.model)
-  tf_dataset_type = tff.SequenceType(dummy_model_for_metadata.input_spec)
+  tf_dataset_type = tff.SequenceType(fake_model_for_metadata.input_spec)
 
   client_update_fn = build_client_update_fn(model_fn, client_optimizer_fn,
                                             client_update_tf, tf_dataset_type,
@@ -474,8 +501,8 @@ def build_federated_averaging_process_attacked(
 
   run_one_round_tff = build_run_one_round_fn_attacked(
       server_update_fn, client_update_fn, aggregation_process,
-      dummy_model_for_metadata, federated_server_state_type,
-      federated_dataset_type)
+      federated_server_state_type, federated_dataset_type,
+      metrics_aggregation_computation)
 
   return tff.templates.IterativeProcess(
       initialize_fn=server_init, next_fn=run_one_round_tff)
@@ -557,7 +584,7 @@ class ClientProjectBoost:
                                                    model_weights.trainable,
                                                    initial_weights.trainable)
 
-      aggregated_outputs = model.report_local_outputs()
+      aggregated_outputs = model.report_local_unfinalized_metrics()
 
       return weights_delta_benign, aggregated_outputs, num_examples_sum
 

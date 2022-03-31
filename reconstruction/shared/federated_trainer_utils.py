@@ -38,7 +38,7 @@ def build_list_sample_fn(a: Union[Sequence[Any], int],
 
   Note that round number is ignored here. For more sophosticated (seeded)
   sampling that remains consistently seeded across rounds, see
-  `training_utils.build_sample_fn`.
+  `tff.simulation.build_uniform_sampling_fn`.
 
   Args:
     a: A 1-D array-like sequence or int that satisfies np.random.choice.
@@ -58,27 +58,30 @@ def build_list_sample_fn(a: Union[Sequence[Any], int],
 
 
 def build_eval_fn(
-    evaluation_computation: tff.Computation,
-    client_datasets_fn: Callable[[int], Any],
+    evaluation_computation: tff.Computation, client_datasets_fn: Callable[[int],
+                                                                          Any],
+    get_model: Callable[[Any], tff.learning.ModelWeights]
 ) -> Callable[[tff.learning.ModelWeights, int], Dict[str, float]]:
   """Creates an evaluation function for use with `training_loop.run`.
 
   Args:
     evaluation_computation: A `tff.Computation` performing evaluation.
     client_datasets_fn: A function taking in an integer round number and
-      returning the expected input of `evaluation_computation`. See
-      `training_utils.build_client_datasets_fn` for an example. For evaluation,
-      the round number passed is always 0, so this function should typically
-      return a different result each time it is called with the same argument,
-      e.g. if it is sampling a subset of users from the evaluation set.
+      returning the expected input of `evaluation_computation`. For
+      evaluation, the round number passed is always 0, so this function should
+      typically return a different result each time it is called with the same
+      argument, e.g. if it is sampling a subset of users from the evaluation
+      set.
+    get_model: A callable accepting the current server state, and returning a
+      `tff.learning.ModelWeights` to be used for evaluation.
 
   Returns:
     An evaluation function accepting as input a `tff.learning.ModelWeights` and
     an integer `round_num`, and returning a dictionary of evaluation metrics.
   """
 
-  def eval_fn(model: tff.learning.ModelWeights,
-              round_num: int) -> Dict[str, float]:
+  def eval_fn(state: Any, round_num: int) -> Dict[str, float]:
+    model = get_model(state)
     sampled_data = client_datasets_fn(round_num)
     return evaluation_computation(model, sampled_data)
 
@@ -153,7 +156,6 @@ def build_dataset_split_fn(
     A `SplitDatasetFn`.
   """
 
-  @tf.function
   def dataset_split_fn(
       client_dataset: tf.data.Dataset,
       round_num: tf.Tensor) -> Tuple[tf.data.Dataset, tf.data.Dataset]:

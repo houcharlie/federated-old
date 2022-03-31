@@ -18,7 +18,6 @@ py_test(
     srcs_version = "PY3",
     tags = [
         "manual",
-        "nokokoro",
         "nopresubmit",
     ],
     deps = [":cifar10_dataset"],
@@ -52,6 +51,24 @@ py_test(
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [":emnist_dataset"],
+)
+
+py_library(
+    name = "infinite_emnist",
+    srcs = ["infinite_emnist.py"],
+    srcs_version = "PY3",
+)
+
+py_test(
+    name = "infinite_emnist_test",
+    size = "medium",
+    srcs = ["infinite_emnist_test.py"],
+    python_version = "PY3",
+    srcs_version = "PY3",
+    tags = [
+        "manual",
+    ],
+    deps = [":infinite_emnist"],
 )
 
 py_library(

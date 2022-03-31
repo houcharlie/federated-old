@@ -1,7 +1,5 @@
 load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 
-package(default_visibility = ["//visibility:public"])
-
 licenses(["notice"])
 
 py_library(
@@ -16,10 +14,10 @@ py_test(
     size = "large",
     srcs = ["adaptive_fed_avg_test.py"],
     python_version = "PY3",
+    shard_count = 2,
     srcs_version = "PY3",
     tags = [
         "manual",
-        "nokokoro",
     ],
     deps = [
         ":adaptive_fed_avg",
@@ -50,15 +48,9 @@ py_binary(
     deps = [
         ":adaptive_fed_avg",
         ":callbacks",
-        "//optimization/cifar100:federated_cifar100",
-        "//optimization/emnist:federated_emnist",
-        "//optimization/emnist_ae:federated_emnist_ae",
-        "//optimization/shakespeare:federated_shakespeare",
-        "//optimization/shared:optimizer_utils",
-        "//optimization/shared:training_specs",
-        "//optimization/stackoverflow:federated_stackoverflow",
-        "//optimization/stackoverflow_lr:federated_stackoverflow_lr",
-        "//utils:training_loop",
+        "//utils:task_utils",
+        "//utils:training_utils",
         "//utils:utils_impl",
+        "//utils/optimizers:optimizer_utils",
     ],
 )

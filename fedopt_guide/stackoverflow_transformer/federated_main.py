@@ -22,34 +22,33 @@ import tensorflow_federated as tff
 
 from fedopt_guide import training_loop
 from fedopt_guide.stackoverflow_transformer import transformer_models
-from optimization.shared import keras_metrics
-from utils import training_utils
+from utils import keras_metrics
 from utils.datasets import stackoverflow_word_prediction
 
 
-def run_federated(
-    iterative_process_builder: Callable[..., tff.templates.IterativeProcess],
-    client_epochs_per_round: int,
-    client_batch_size: int,
-    clients_per_round: int,
-    max_elements_per_user: int,
-    total_rounds: int = 3000,
-    vocab_size: int = 10000,
-    num_oov_buckets: int = 1,
-    sequence_length: int = 20,
-    num_validation_examples: int = 10000,
-    dim_embed: int = 96,
-    dim_model: int = 512,
-    dim_hidden: int = 2048,
-    num_heads: int = 8,
-    num_layers: int = 1,
-    max_position_encoding: int = 1000,
-    dropout: float = 0.1,
-    client_datasets_random_seed: Optional[int] = None,
-    experiment_name: str = 'federated_stackoverflow',
-    root_output_dir: str = '/tmp/fedopt_guide',
-    max_val_test_batches: Optional[int] = None,
-    **kwargs) -> None:
+def run_federated(iterative_process_builder: Callable[
+    ..., tff.templates.IterativeProcess],
+                  client_epochs_per_round: int,
+                  client_batch_size: int,
+                  clients_per_round: int,
+                  max_elements_per_user: int,
+                  total_rounds: int = 3000,
+                  vocab_size: int = 10000,
+                  num_oov_buckets: int = 1,
+                  sequence_length: int = 20,
+                  num_validation_examples: int = 10000,
+                  dim_embed: int = 96,
+                  dim_model: int = 512,
+                  dim_hidden: int = 2048,
+                  num_heads: int = 8,
+                  num_layers: int = 1,
+                  max_position_encoding: int = 1000,
+                  dropout: float = 0.1,
+                  client_datasets_random_seed: Optional[int] = None,
+                  experiment_name: str = 'federated_stackoverflow',
+                  root_output_dir: str = '/tmp/fedopt_guide',
+                  max_val_test_batches: Optional[int] = None,
+                  **kwargs) -> None:
   """Configures training for Stack Overflow next-word prediction.
 
   This method will load and pre-process dataset and construct a model used for
@@ -129,9 +128,9 @@ def run_federated(
       transformer_models.create_transformer_lm,
       vocab_size=vocab_size,
       num_oov_buckets=num_oov_buckets,
-      d_embed=dim_embed,
-      d_model=dim_model,
-      d_hidden=dim_hidden,
+      dim_embed=dim_embed,
+      dim_model=dim_model,
+      dim_hidden=dim_hidden,
       num_heads=num_heads,
       num_layers=num_layers,
       max_position_encoding=max_position_encoding,
@@ -157,19 +156,19 @@ def run_federated(
         keras_metrics.MaskedCategoricalAccuracy(
             name='accuracy_no_oov_or_eos',
             masked_tokens=[pad_token, eos_token] + oov_tokens),
-        keras_metrics.NumBatchesCounter(),
+        tff.learning.metrics.NumBatchesCounter(),
         keras_metrics.NumTokensCounter(masked_tokens=[pad_token])
     ]
 
-  train_dataset_preprocess_comp = stackoverflow_word_prediction.create_preprocess_fn(
+  preprocess_fn = stackoverflow_word_prediction.create_preprocess_fn(
       vocab=stackoverflow_word_prediction.create_vocab(vocab_size),
       num_oov_buckets=num_oov_buckets,
       client_batch_size=client_batch_size,
       client_epochs_per_round=client_epochs_per_round,
       max_sequence_length=sequence_length,
       max_elements_per_client=max_elements_per_user)
-
-  input_spec = train_dataset_preprocess_comp.type_signature.result.element
+  train_clientdata = train_clientdata.preprocess(preprocess_fn)
+  input_spec = train_clientdata.element_type_structure
 
   def tff_model_fn() -> tff.learning.Model:
     return tff.learning.from_keras_model(
@@ -186,48 +185,29 @@ def run_federated(
   iterative_process = iterative_process_builder(
       tff_model_fn, client_weight_fn=client_weight_fn)
 
-  if hasattr(train_clientdata, 'dataset_computation'):
+  training_process = tff.simulation.compose_dataset_computation_with_iterative_process(
+      train_clientdata.dataset_computation, iterative_process)
+  client_ids_fn = functools.partial(
+      tff.simulation.build_uniform_sampling_fn(
+          train_clientdata.client_ids,
+          replace=False,
+          random_seed=client_datasets_random_seed),
+      size=clients_per_round)
+  # We convert the output to a list (instead of an np.ndarray) so that it can
+  # be used as input to the iterative process.
+  client_sampling_fn = lambda x: list(client_ids_fn(x))
 
-    @tff.tf_computation(tf.string)
-    def train_dataset_computation(client_id):
-      client_train_data = train_clientdata.dataset_computation(client_id)
-      return train_dataset_preprocess_comp(client_train_data)
+  training_process.get_model_weights = iterative_process.get_model_weights  # pytype: disable=attribute-error  # gen-stub-imports
 
-    training_process = tff.simulation.compose_dataset_computation_with_iterative_process(
-        train_dataset_computation, iterative_process)
-    client_ids_fn = training_utils.build_sample_fn(
-        train_clientdata.client_ids,
-        size=clients_per_round,
-        replace=False,
-        random_seed=client_datasets_random_seed)
-    # We convert the output to a list (instead of an np.ndarray) so that it can
-    # be used as input to the iterative process.
-    client_sampling_fn = lambda x: list(client_ids_fn(x))
-  else:
-    training_process = tff.simulation.compose_dataset_computation_with_iterative_process(
-        train_dataset_preprocess_comp, iterative_process)
-    client_sampling_fn = training_utils.build_client_datasets_fn(
-        dataset=train_clientdata,
-        clients_per_round=clients_per_round,
-        random_seed=client_datasets_random_seed)
+  evaluate_fn = tff.learning.build_federated_evaluation(
+      tff_model_fn, use_experimental_simulation_loop=True)
 
-  training_process.get_model_weights = iterative_process.get_model_weights
+  def validation_fn(model_weights, round_num):
+    del round_num
+    return evaluate_fn(model_weights, [validation_dataset])
 
-  evaluate_fn = training_utils.build_centralized_evaluate_fn(
-      model_builder=model_builder,
-      eval_dataset=validation_dataset,
-      loss_builder=loss_builder,
-      metrics_builder=metrics_builder)
-
-  validation_fn = lambda model_weights, round_num: evaluate_fn(model_weights)
-
-  test_fn = training_utils.build_centralized_evaluate_fn(
-      model_builder=model_builder,
-      # Use both val and test for symmetry with other experiments, which
-      # evaluate on the entire test set.
-      eval_dataset=validation_dataset.concatenate(test_dataset),
-      loss_builder=loss_builder,
-      metrics_builder=metrics_builder)
+  def test_fn(model_weights):
+    return evaluate_fn(model_weights, [test_dataset])
 
   logging.info('Training model:')
   logging.info(model_builder().summary())

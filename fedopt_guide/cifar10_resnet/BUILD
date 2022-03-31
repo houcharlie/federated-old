@@ -1,7 +1,5 @@
 load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 
-package(default_visibility = ["//visibility:public"])
-
 licenses(["notice"])
 
 py_test(
@@ -12,7 +10,6 @@ py_test(
     srcs_version = "PY3",
     tags = [
         "manual",
-        "nokokoro",
         "nopresubmit",
         "requires-gpu-nvidia",
     ],
@@ -26,7 +23,6 @@ py_test(
     srcs_version = "PY3",
     tags = [
         "manual",
-        "nokokoro",
         "nopresubmit",
     ],
     deps = [":centralized_cifar10"],
@@ -38,7 +34,6 @@ py_library(
     srcs_version = "PY3",
     deps = [
         "//fedopt_guide:training_loop",
-        "//utils:training_utils",
         "//utils/datasets:cifar10_dataset",
         "//utils/models:resnet_models",
     ],
@@ -49,7 +44,7 @@ py_library(
     srcs = ["centralized_cifar10.py"],
     srcs_version = "PY3",
     deps = [
-        "//utils:centralized_training_loop",
+        "//fedopt_guide:centralized_training_loop",
         "//utils/datasets:cifar10_dataset",
         "//utils/models:resnet_models",
     ],
@@ -60,10 +55,17 @@ py_binary(
     srcs = ["federated_trainer.py"],
     python_version = "PY3",
     srcs_version = "PY3",
+    deps = [":federated_trainer_lib"],
+)
+
+py_library(
+    name = "federated_trainer_lib",
+    srcs = ["federated_trainer.py"],
+    srcs_version = "PY3",
     deps = [
         ":federated_cifar10",
-        "//optimization/shared:optimizer_utils",
         "//utils:utils_impl",
+        "//utils/optimizers:optimizer_utils",
     ],
 )
 
@@ -74,7 +76,7 @@ py_binary(
     srcs_version = "PY3",
     deps = [
         ":centralized_cifar10",
-        "//optimization/shared:optimizer_utils",
         "//utils:utils_impl",
+        "//utils/optimizers:optimizer_utils",
     ],
 )

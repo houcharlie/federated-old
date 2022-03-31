@@ -19,11 +19,10 @@ from typing import Callable
 import tensorflow as tf
 import tensorflow_federated as tff
 
-from optimization.shared import keras_metrics
 from reconstruction.shared import federated_trainer_utils
 from reconstruction.stackoverflow import models
 from reconstruction.stackoverflow import stackoverflow_dataset
-from utils import training_loop
+from utils import keras_metrics
 from utils import training_utils
 from utils.datasets import stackoverflow_word_prediction
 
@@ -44,11 +43,12 @@ def run_federated(
     total_rounds: int = 1500,
     experiment_name: str = 'federated_so_nwp',
     root_output_dir: str = '/tmp/fed_recon',
+    rounds_per_eval: int = 1,
+    rounds_per_checkpoint: int = 50,
     split_dataset_strategy: str = federated_trainer_utils
     .SPLIT_STRATEGY_AGGREGATED,
     split_dataset_proportion: int = 2,
-    compose_dataset_computation: bool = False,
-    **kwargs):
+    compose_dataset_computation: bool = False):
   """Runs an iterative process on the Stack Overflow next word prediction task.
 
   This method will load and pre-process dataset and construct a model used for
@@ -104,6 +104,10 @@ def run_federated(
       to the `root_output_dir` for purposes of writing outputs.
     root_output_dir: The name of the root output directory for writing
       experiment outputs.
+    rounds_per_eval: How often to compute validation metrics.
+    rounds_per_checkpoint: How often to checkpoint the iterative process state.
+      If you expect the job to restart frequently, this should be small. If no
+      interruptions are expected, this can be made larger.
     split_dataset_strategy: The method to use to split the data. Must be one of
       `skip`, in which case every `split_dataset_proportion` example is used for
       reconstruction, or `aggregated`, when the first
@@ -116,8 +120,6 @@ def run_federated(
       training and evaluation computations. If True, may speed up experiments by
       parallelizing dataset computations in multimachine setups. Not currently
       supported in OSS.
-    **kwargs: Additional arguments configuring the training loop. For details on
-      supported arguments, see `training_loop.py`.
   """
 
   loss_fn = functools.partial(
@@ -139,7 +141,7 @@ def run_federated(
         keras_metrics.MaskedCategoricalAccuracy(
             name='accuracy_no_oov_or_eos',
             masked_tokens=[pad_token, eos_token] + oov_tokens),
-        keras_metrics.NumBatchesCounter(),
+        tff.learning.metrics.NumBatchesCounter(),
         keras_metrics.NumTokensCounter(masked_tokens=[pad_token])
     ]
 
@@ -147,16 +149,21 @@ def run_federated(
       tff.simulation.datasets.stackoverflow.load_data())
 
   vocab = stackoverflow_word_prediction.create_vocab(vocab_size)
-  dataset_preprocess_comp = stackoverflow_dataset.create_preprocess_fn(
+  dataset_preprocess_fn = stackoverflow_dataset.create_preprocess_fn(
       vocab=vocab,
       num_oov_buckets=num_oov_buckets,
       client_batch_size=client_batch_size,
       max_sequence_length=sequence_length,
       max_elements_per_client=max_elements_per_user,
-      feature_dtypes=train_clientdata.element_type_structure,
       sort_by_date=True)
+  feature_dtypes = train_clientdata.element_type_structure
 
-  input_spec = dataset_preprocess_comp.type_signature.result.element
+  @tff.tf_computation(tff.SequenceType(feature_dtypes))
+  def dataset_preprocess_comp(dataset):
+    return dataset_preprocess_fn(dataset)
+
+  preprocess_train = train_clientdata.preprocess(dataset_preprocess_fn)
+  input_spec = preprocess_train.element_type_structure
 
   model_fn = functools.partial(
       models.create_recurrent_reconstruction_model,
@@ -203,7 +210,7 @@ def run_federated(
     training_process = (
         tff.simulation.compose_dataset_computation_with_iterative_process(
             train_clientdata.dataset_computation, training_process))
-    training_process.get_model_weights = iterative_process.get_model_weights
+    training_process.get_model_weights = iterative_process.get_model_weights  # pytype: disable=attribute-error  # gen-stub-imports
 
     base_eval_computation = (
         tff.simulation.compose_dataset_computation_with_computation(
@@ -236,28 +243,40 @@ def run_federated(
     test_clientdata = test_clientdata.preprocess(dataset_preprocess_comp)
 
     # Create client sampling functions for each of train/val/test.
-    train_client_datasets_fn = training_utils.build_client_datasets_fn(
-        train_clientdata, clients_per_round=clients_per_round)
-    val_client_datasets_fn = training_utils.build_client_datasets_fn(
-        validation_clientdata, clients_per_round=clients_per_round)
-    test_client_datasets_fn = training_utils.build_client_datasets_fn(
-        test_clientdata, clients_per_round=clients_per_round)
+    train_client_datasets_fn = functools.partial(
+        tff.simulation.build_uniform_sampling_fn(train_clientdata.client_ids),
+        size=clients_per_round)
+    val_client_datasets_fn = functools.partial(
+        tff.simulation.build_uniform_sampling_fn(
+            validation_clientdata.client_ids),
+        size=clients_per_round)
+    test_client_datasets_fn = functools.partial(
+        tff.simulation.build_uniform_sampling_fn(test_clientdata.client_ids),
+        size=clients_per_round)
 
-  # Create final evaluation functions to pass to `training_loop`.
-  val_fn = federated_trainer_utils.build_eval_fn(
-      evaluation_computation=val_computation,
-      client_datasets_fn=val_client_datasets_fn)
+  def val_fn(state, sampled_data):
+    model = training_process.get_model_weights(state)
+    return val_computation(model, sampled_data)
+
   test_fn = federated_trainer_utils.build_eval_fn(
       evaluation_computation=test_computation,
-      client_datasets_fn=test_client_datasets_fn)
+      client_datasets_fn=test_client_datasets_fn,
+      get_model=training_process.get_model_weights)
   test_fn = functools.partial(test_fn, round_num=0)
 
-  training_loop.run(
-      iterative_process=training_process,
-      client_datasets_fn=train_client_datasets_fn,
-      validation_fn=val_fn,
-      test_fn=test_fn,
+  program_state_manager, metrics_managers = training_utils.create_managers(
+      root_output_dir, experiment_name)
+  state = tff.simulation.run_training_process(
+      training_process=training_process,
+      training_selection_fn=train_client_datasets_fn,
       total_rounds=total_rounds,
-      experiment_name=experiment_name,
-      root_output_dir=root_output_dir,
-      **kwargs)
+      evaluation_fn=val_fn,
+      evaluation_selection_fn=val_client_datasets_fn,
+      rounds_per_evaluation=rounds_per_eval,
+      program_state_manager=program_state_manager,
+      rounds_per_saving_program_state=rounds_per_checkpoint,
+      metrics_managers=metrics_managers)
+
+  test_metrics = test_fn(state)
+  for metrics_manager in metrics_managers:
+    metrics_manager.release(test_metrics, total_rounds + 1)

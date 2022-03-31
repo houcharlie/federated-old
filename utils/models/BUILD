@@ -45,6 +45,10 @@ py_test(
     srcs = ["resnet_models_test.py"],
     python_version = "PY3",
     srcs_version = "PY3",
+    tags = [
+        "manual",
+        "notap",
+    ],  # TODO(b/186459094): fix failure due to tensorflow addon.
     deps = [":resnet_models"],
 )
 
@@ -61,7 +65,7 @@ py_test(
     srcs_version = "PY3",
     deps = [
         ":shakespeare_models",
-        "//optimization/shared:keras_metrics",
+        "//utils:keras_metrics",
     ],
 )
 

@@ -76,9 +76,8 @@ class GanFnsAndTypes(object):
   # (https://github.com/tensorflow/privacy/blob/v.0.2.2/tensorflow_privacy/privacy/dp_query/dp_query.py#L54)
   # Defaults to `None`, meaning no differential privacy query is used, no
   # clipping or noising is performed, and standard stateless weighted
-  # aggregation occurs. If specified, it MUST be an instance of an average query
-  # class (as opposed to a sum query). E.g., valid classes are
-  # `privacy.NoPrivacyAverageQuery`, `privacy.GaussianAverageQuery`, etc.
+  # aggregation occurs. If specified, it MUST be an instance of a
+  # `privacy.NormalizedQuery`.
   train_discriminator_dp_average_query = attr.ib(
       type=tensorflow_privacy.DPQuery, default=None)
 
@@ -146,11 +145,11 @@ class GanFnsAndTypes(object):
     if self.train_discriminator_dp_average_query is not None:
       self.aggregation_process = tff.aggregators.DifferentiallyPrivateFactory(
           query=self.train_discriminator_dp_average_query).create(
-              value_type=tff.to_type(self.discriminator_weights_type))
+              value_type=tff.to_type(self.discriminator_weights_type))  # pytype: disable=wrong-arg-types  # gen-stub-imports
     else:
       self.aggregation_process = tff.aggregators.MeanFactory().create(
           value_type=tff.to_type(self.discriminator_weights_type),
-          weight_type=tff.to_type(tf.float32))
+          weight_type=tff.to_type(tf.float32))  # pytype: disable=wrong-arg-types  # gen-stub-imports
 
 
 def build_server_initial_state_comp(gan: GanFnsAndTypes):
@@ -363,14 +362,38 @@ def build_gan_training_process(gan: GanFnsAndTypes,
       compute_control_input_disc, (control_output.discriminator_weights_delta, central_control_disc)
     )
     client_outputs = tff.federated_map(
-        client_computation, (client_gen_inputs, client_real_data, client_input, 
-                            control_input_gen, control_input_disc))
+        client_computation, (client_gen_inputs, client_real_data, client_input))
 
-    gen_delta = tff.federated_mean(client_outputs.generator_weights_delta, weight=client_outputs.update_weight)
-    disc_delta = tff.federated_mean(client_outputs.discriminator_weights_delta, weight=client_outputs.update_weight)
+    # Note that weight goes unused here if the aggregation is involving
+    # Differential Privacy; the underlying AggregationProcess doesn't take the
+    # parameter, as it just uniformly weights the clients.
+    if gan.aggregation_process.is_weighted:
+      aggregation_output = gan.aggregation_process.next(
+          server_state.aggregation_state,
+          client_outputs.discriminator_weights_delta,
+          client_outputs.update_weight)
+    else:
+      aggregation_output = gan.aggregation_process.next(
+          server_state.aggregation_state,
+          client_outputs.discriminator_weights_delta)
+
+    new_aggregation_state = aggregation_output.state
+    averaged_discriminator_weights_delta = aggregation_output.result
+
+    # TODO(b/131085687): Perhaps reconsider the choice to also use
+    # ClientOutput to hold the aggregated client output.
+    aggregated_client_output = gan_training_tf_fns.ClientOutput(
+        discriminator_weights_delta=averaged_discriminator_weights_delta,
+        # We don't actually need the aggregated update_weight, but
+        # this keeps the types of the non-aggregated and aggregated
+        # client_output the same, which is convenient. And I can
+        # imagine wanting this.
+        update_weight=tff.federated_sum(client_outputs.update_weight),
+        counters=tff.federated_sum(client_outputs.counters))
 
     server_computation = build_server_computation(
-        gan, server_state.type_signature.member)
+        gan, server_state.type_signature.member, client_output_type,
+        gan.aggregation_process.state_type.member)  # pytype: disable=attribute-error  # gen-stub-imports
     server_state = tff.federated_map(
         server_computation, (server_state, gen_delta, disc_delta))
     return server_state

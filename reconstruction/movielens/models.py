@@ -28,7 +28,7 @@ Usage:
 """
 
 import collections
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 import attr
 import tensorflow as tf
@@ -210,7 +210,7 @@ def get_matrix_factorization_model(
   model = tf.keras.Model(inputs=keras_inputs, outputs=pred)
 
   return MatrixFactorizationModel(model, global_layers, local_layers,
-                                  input_spec)
+                                  input_spec)  # pytype: disable=wrong-arg-types
 
 
 def build_reconstruction_model(
@@ -349,8 +349,8 @@ def get_metrics_fn(
   def metrics_fn() -> List[tf.keras.metrics.Metric]:
     return [
         ReconstructionAccuracyMetric(accuracy_threshold),
-        NumExamplesCounter(),
-        NumBatchesCounter()
+        tff.learning.metrics.NumExamplesCounter(),
+        tff.learning.metrics.NumBatchesCounter()
     ]
 
   return metrics_fn
@@ -482,9 +482,10 @@ class ReconstructionAccuracyMetric(tf.keras.metrics.Mean):
     super().__init__(name=name, **kwargs)
     self.threshold = threshold
 
-  def update_state(self, y_true: tf.Tensor,
+  def update_state(self,
+                   y_true: tf.Tensor,
                    y_pred: tf.Tensor,
-                   sample_weight: tf.Tensor = None):
+                   sample_weight: Optional[tf.Tensor] = None):
     y_true = tf.keras.backend.cast(y_true, self._dtype)
     y_pred = tf.keras.backend.cast(y_pred, self._dtype)
     absolute_diffs = tf.keras.backend.abs(y_true - y_pred)
@@ -499,33 +500,3 @@ class ReconstructionAccuracyMetric(tf.keras.metrics.Mean):
     config = {'threshold': self.threshold}
     base_config = super().get_config()
     return dict(list(base_config.items()) + list(config.items()))
-
-
-class NumExamplesCounter(tf.keras.metrics.Sum):
-  """A custom sum that counts the number of examples seen.
-
-  `sample_weight` is unused since this is just a counter.
-  """
-
-  def __init__(self,
-               name: str = 'num_examples',
-               **kwargs):
-    super().__init__(name=name, **kwargs)
-
-  def update_state(self, y_true, y_pred, sample_weight=None):
-    return super().update_state(tf.shape(y_pred)[0])
-
-
-class NumBatchesCounter(tf.keras.metrics.Sum):
-  """A custom sum that counts the number of batches seen.
-
-  `sample_weight` is unused since this is just a counter.
-  """
-
-  def __init__(self,
-               name: str = 'num_batches',
-               **kwargs):
-    super().__init__(name=name, **kwargs)
-
-  def update_state(self, y_true, y_pred, sample_weight=None):
-    return super().update_state(1)

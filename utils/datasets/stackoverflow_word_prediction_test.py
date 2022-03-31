@@ -20,7 +20,6 @@ import tensorflow_federated as tff
 
 from utils.datasets import stackoverflow_word_prediction
 
-
 TEST_DATA = collections.OrderedDict(
     creation_date=(['unused date']),
     score=([tf.constant(0, dtype=tf.int64)]),
@@ -29,6 +28,8 @@ TEST_DATA = collections.OrderedDict(
     tokens=(['one must imagine']),
     type=(['unused type']),
 )
+
+TEST_SEED = 0xBAD5EED
 
 
 class ConvertToTokensTest(tf.test.TestCase):
@@ -204,9 +205,9 @@ class FederatedDatasetTest(tf.test.TestCase):
     # objects we desired are used.
     #
     # The correctness of the preprocessing function is tested in other tests.
-    mock_train = mock.create_autospec(tff.simulation.ClientData)
-    mock_validation = mock.create_autospec(tff.simulation.ClientData)
-    mock_test = mock.create_autospec(tff.simulation.ClientData)
+    mock_train = mock.create_autospec(tff.simulation.datasets.ClientData)
+    mock_validation = mock.create_autospec(tff.simulation.datasets.ClientData)
+    mock_test = mock.create_autospec(tff.simulation.datasets.ClientData)
     mock_load_data.return_value = (mock_train, mock_validation, mock_test)
     # Return a factor word dictionary.
     mock_load_word_counts.return_value = collections.OrderedDict(a=1)
@@ -267,13 +268,15 @@ class CentralizedDatasetTest(tf.test.TestCase):
     # The correctness of the preprocessing function is tested in other tests.
     sample_ds = tf.data.Dataset.from_tensor_slices(TEST_DATA)
 
-    mock_train = mock.create_autospec(tff.simulation.ClientData)
+    mock_train = mock.create_autospec(tff.simulation.datasets.ClientData)
     mock_train.create_tf_dataset_from_all_clients = mock.Mock(
         return_value=sample_ds)
 
-    mock_validation = mock.create_autospec(tff.simulation.ClientData)
+    mock_validation = mock.create_autospec(tff.simulation.datasets.ClientData)
+    mock_validation.create_tf_dataset_from_all_clients = mock.Mock(
+        return_value=sample_ds)
 
-    mock_test = mock.create_autospec(tff.simulation.ClientData)
+    mock_test = mock.create_autospec(tff.simulation.datasets.ClientData)
     mock_test.create_tf_dataset_from_all_clients = mock.Mock(
         return_value=sample_ds)
 
@@ -290,15 +293,11 @@ class CentralizedDatasetTest(tf.test.TestCase):
         max_sequence_length=20,
         num_oov_buckets=1)
 
-    # Assert the validation ClientData isn't used.
+    # Assert the datasets are created via create_tf_dataset_from_all_clients.
     mock_load_data.assert_called_once()
-    self.assertEmpty(mock_validation.mock_calls)
-
-    # Assert the validation ClientData isn't used, and the train and test
-    # are amalgamated into datasets single datasets over all clients.
-    mock_load_data.assert_called_once()
-    self.assertEmpty(mock_validation.mock_calls)
     self.assertEqual(mock_train.mock_calls,
+                     mock.call.create_tf_dataset_from_all_clients().call_list())
+    self.assertEqual(mock_validation.mock_calls,
                      mock.call.create_tf_dataset_from_all_clients().call_list())
     self.assertEqual(mock_test.mock_calls,
                      mock.call.create_tf_dataset_from_all_clients().call_list())

@@ -13,8 +13,7 @@
 # limitations under the License.
 """Data loader for Stackoverflow tag prediction tasks."""
 
-import collections
-from typing import Callable, List, Tuple, Optional
+from typing import Callable, List, Tuple
 
 import numpy as np
 import tensorflow as tf
@@ -74,7 +73,8 @@ def create_preprocess_fn(
     client_batch_size: int,
     client_epochs_per_round: int,
     max_elements_per_client: int,
-    max_shuffle_buffer_size: int = 10000) -> tff.Computation:
+    max_shuffle_buffer_size: int = 10000
+) -> Callable[[tf.data.Dataset], tf.data.Dataset]:
   """Creates a preprocessing function for Stack Overflow tag prediction data.
 
   This function creates a `tff.Computation` which takes a dataset, and returns
@@ -98,7 +98,7 @@ def create_preprocess_fn(
     max_shuffle_buffer_size: Maximum shuffle buffer size.
 
   Returns:
-    A `tff.Computation` taking as input a `tf.data.Dataset`, and returning a
+    A callable taking as input a `tf.data.Dataset`, and returning a
     `tf.data.Dataset` formed by preprocessing according to the input arguments.
   """
   if client_batch_size <= 0:
@@ -118,18 +118,6 @@ def create_preprocess_fn(
   else:
     shuffle_buffer_size = max_elements_per_client
 
-  # Features are intentionally sorted lexicographically by key for consistency
-  # across datasets.
-  feature_dtypes = collections.OrderedDict(
-      creation_date=tf.string,
-      score=tf.int64,
-      tags=tf.string,
-      title=tf.string,
-      tokens=tf.string,
-      type=tf.string,
-  )
-
-  @tff.tf_computation(tff.SequenceType(feature_dtypes))
   def preprocess_fn(dataset):
     to_ids = build_to_ids_fn(word_vocab, tag_vocab)
     return (dataset.take(max_elements_per_client).shuffle(shuffle_buffer_size)
@@ -154,7 +142,8 @@ def get_federated_datasets(
     max_elements_per_test_client: int = -1,
     train_shuffle_buffer_size: int = 10000,
     test_shuffle_buffer_size: int = 1
-) -> Tuple[tff.simulation.ClientData, tff.simulation.ClientData]:
+) -> Tuple[tff.simulation.datasets.ClientData,
+           tff.simulation.datasets.ClientData]:
   """Loads federated Stack Overflow tag prediction datasts.
 
   This function returns preprocessed versions of the training and test splits
@@ -192,8 +181,8 @@ def get_federated_datasets(
 
   Returns:
     A tuple (stackoverflow_train, stackoverflow_test) of
-    `tff.simulation.ClientData` instances representing the federated training
-    and test datasets.
+    `tff.simulation.datasets.ClientData` instances representing the federated
+    training and test datasets.
   """
   if word_vocab_size <= 0:
     raise ValueError('word_vocab_size must be a positive integer; you have '

@@ -1,4 +1,4 @@
-# Copyright 2020, Google LLC.
+# Copyright 2021, Google LLC.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,348 +11,142 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Shared library for setting up federated training experiments."""
+"""Utilities for performing federated learning training simulations via TFF."""
 
-import collections
-import functools
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Union
+import os.path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from absl import logging
-import numpy as np
 import tensorflow as tf
 import tensorflow_federated as tff
 
-
-#  Settings for a multiplicative linear congruential generator (aka Lehmer
-#  generator) suggested in 'Random Number Generators: Good
-#  Ones are Hard to Find' by Park and Miller.
-MLCG_MODULUS = 2**(31) - 1
-MLCG_MULTIPLIER = 16807
-
-# Default quantiles for federated evaluations.
-DEFAULT_QUANTILES = (0.0, 0.25, 0.5, 0.75, 1.0)
+from utils import utils_impl
 
 
-# TODO(b/143440780): Create more comprehensive tuple conversion by adding an
-# explicit namedtuple checking utility.
-def convert_to_tuple_dataset(dataset):
-  """Converts a dataset to one where elements have a tuple structure.
+def create_managers(
+    root_dir: str,
+    experiment_name: str,
+    csv_save_mode: tff.program.CSVSaveMode = tff.program.CSVSaveMode.APPEND
+) -> Tuple[tff.program.FileProgramStateManager,
+           List[tff.program.ReleaseManager]]:
+  """Creates a set of managers for running a simulation.
+
+  The managers that are created and how they are configured are indended to be
+  used with `tff.simulation.run_training_process` to run a simulation.
 
   Args:
-    dataset: A `tf.data.Dataset` where elements either have a mapping
-      structure of format {"x": <features>, "y": <labels>}, or a tuple-like
-        structure of format (<features>, <labels>).
+    root_dir: A string representing the root output directory for the
+      simulation.
+    experiment_name: A unique identifier for the simulation, used to create
+      appropriate subdirectories in `root_dir`.
+    csv_save_mode: A `tff.program.CSVSaveMode` specifying the save mode for the
+      `tff.program.CSVFileReleaseManager`.
 
   Returns:
-    A `tf.data.Dataset` object where elements are tuples of the form
-    (<features>, <labels>).
-
+    A `tff.program.FileProgramStateManager`, and a list of
+    `tff.program.ReleaseManager`s consisting of a
+    `tff.program.LoggingReleaseManager`, a `tff.program.CSVFileReleaseManager`,
+    and a `tff.program.TensorBoardReleaseManager`.
   """
-  example_structure = dataset.element_spec
-  if isinstance(example_structure, collections.abc.Mapping):
-    # We assume the mapping has `x` and `y` keys.
-    convert_map_to_tuple = lambda example: (example['x'], example['y'])
-    try:
-      return dataset.map(convert_map_to_tuple)
-    except:
-      raise ValueError('For datasets with a mapping structure, elements must '
-                       'have format {"x": <features>, "y": <labels>}.')
-  elif isinstance(example_structure, tuple):
+  program_state_dir = os.path.join(root_dir, 'checkpoints', experiment_name)
+  program_state_manager = tff.program.FileProgramStateManager(
+      root_dir=program_state_dir)
 
-    if hasattr(example_structure, '_fields') and isinstance(
-        example_structure._fields, collections.abc.Sequence) and all(
-            isinstance(f, str) for f in example_structure._fields):
-      # Dataset has namedtuple structure
-      convert_tuplelike_to_tuple = lambda x: (x[0], x[1])
-    else:
-      # Dataset does not have namedtuple structure
-      convert_tuplelike_to_tuple = lambda x, y: (x, y)
+  logging_release_manager = tff.program.LoggingReleaseManager()
 
-    try:
-      return dataset.map(convert_tuplelike_to_tuple)
-    except:
-      raise ValueError('For datasets with tuple-like structure, elements must '
-                       'have format (<features>, <labels>).')
-  else:
-    raise ValueError(
-        'Expected evaluation dataset to have elements with a mapping or '
-        'tuple-like structure, found {} instead.'.format(example_structure))
+  csv_file_path = os.path.join(root_dir, 'results', experiment_name,
+                               'experiment.metrics.csv')
+  csv_file_release_manager = tff.program.CSVFileReleaseManager(
+      file_path=csv_file_path,
+      save_mode=csv_save_mode,
+      key_fieldname='round_num')
 
+  summary_dir = os.path.join(root_dir, 'logdir', experiment_name)
+  tensorboard_release_manager = tff.program.TensorBoardReleaseManager(
+      summary_dir=summary_dir)
 
-def build_centralized_evaluate_fn(
-    eval_dataset: tf.data.Dataset, model_builder: Callable[[], tf.keras.Model],
-    loss_builder: Callable[[], tf.keras.losses.Loss],
-    metrics_builder: Callable[[], List[tf.keras.metrics.Metric]]
-) -> Callable[[tff.learning.ModelWeights], Dict[str, Any]]:
-  """Builds a centralized evaluation function for a model and test dataset.
-
-  The evaluation function takes as input a `tff.learning.ModelWeights`, and
-  computes metrics on a keras model with the same weights.
-
-  Args:
-    eval_dataset: A `tf.data.Dataset` object. Dataset elements should either
-      have a mapping structure of format {"x": <features>, "y": <labels>}, or a
-        tuple structure of format (<features>, <labels>).
-    model_builder: A no-arg function that returns a `tf.keras.Model` object.
-    loss_builder: A no-arg function returning a `tf.keras.losses.Loss` object.
-    metrics_builder: A no-arg function that returns a list of
-      `tf.keras.metrics.Metric` objects.
-
-  Returns:
-    A function that take as input a `tff.learning.ModelWeights` and returns
-    a dict of (name, value) pairs for each associated evaluation metric.
-  """
-
-  def compiled_eval_keras_model():
-    model = model_builder()
-    model.compile(
-        loss=loss_builder(),
-        optimizer=tf.keras.optimizers.SGD(),  # Dummy optimizer for evaluation
-        metrics=metrics_builder())
-    return model
-
-  eval_tuple_dataset = convert_to_tuple_dataset(eval_dataset)
-
-  def evaluate_fn(reference_model: tff.learning.ModelWeights) -> Dict[str, Any]:
-    """Evaluation function to be used during training."""
-
-    if not isinstance(reference_model, tff.learning.ModelWeights):
-      raise TypeError('The reference model used for evaluation must be a'
-                      '`tff.learning.ModelWeights` instance.')
-
-    model_weights_as_list = tff.learning.ModelWeights(
-        trainable=list(reference_model.trainable),
-        non_trainable=list(reference_model.non_trainable))
-
-    keras_model = compiled_eval_keras_model()
-    model_weights_as_list.assign_weights_to(keras_model)
-    logging.info('Evaluating the current model')
-    eval_metrics = keras_model.evaluate(eval_tuple_dataset, verbose=0)
-    return dict(zip(keras_model.metrics_names, eval_metrics))
-
-  return evaluate_fn
-
-
-def _build_client_evaluate_fn(model, metrics):
-  """Creates a client evaluation function for a given model and metrics.
-
-  This evaluation function is intended to be re-used for multiple clients during
-  an evaluation pass over clients.
-
-  Args:
-    model: A `tf.keras.Model` used to compute metrics.
-    metrics: A list of `tf.keras.metrics.Mean` metrics.
-
-  Returns:
-    A function that takes as input a `tf.data.Dataset`, and returns an ordered
-      dictionary of metrics for the input model on that dataset.
-  """
-
-  @tf.function
-  def get_client_eval_metrics(dataset):
-
-    # Reset metrics
-    for metric in metrics:
-      metric.reset_states()
-
-    # Compute metrics
-    num_examples = tf.constant(0, dtype=tf.int32)
-    for x_batch, y_batch in dataset:
-      output = model(x_batch, training=False)
-      for metric in metrics:
-        metric.update_state(y_batch, output)
-      num_examples += tf.shape(output)[0]
-
-    # Record metrics
-    metric_results = collections.OrderedDict()
-    for metric in metrics:
-      metric_results[metric.name] = metric.result()
-
-    metric_results['num_examples'] = num_examples
-
-    return metric_results
-
-  return get_client_eval_metrics
-
-
-def build_federated_evaluate_fn(
-    model_builder: Callable[[], tf.keras.Model],
-    metrics_builder: Callable[[], List[tf.keras.metrics.Metric]],
-    quantiles: Optional[Iterable[float]] = DEFAULT_QUANTILES,
-) -> Callable[[tff.learning.ModelWeights, List[tf.data.Dataset]], Dict[str,
-                                                                       Any]]:
-  """Builds a federated evaluation method for a given model and test dataset.
-
-  The evaluation function takes as input a `tff.learning.ModelWeights`, and
-  computes metrics on a `tff.learning.Model` with the same weights. This method
-  returns a nested structure of (metric_name, metric_value) pairs.  The
-  `tf.keras.metrics.Metric` objects in `metrics_builder()` must have a
-  callable attribute `update_state` accepting both the true label and the
-  predicted label of a model.
-
-  The resulting nested structure is an ordered dictionary with keys given by
-  metric names, and values given by nested structure of the metric value,
-  potentially aggregated in different ways.
-
-  For example, if `metrics_builder = lambda:
-  [tf.keras.metrics.MeanSquaredError()]`,
-  the resulting nested structure will be of the form:
-  [
-  ('mean_squared_error', [
-    ('example_weighted', ...),
-    ('uniform_weighted', ...),
-    ('quantiles', ...)
-  ]),
-  ('num_examples', [
-    ('example_weighted', ...),
-    ('uniform_weighted', ...),
-    ('quantiles', ...)
-  ]),
+  logging.info('Writing...')
+  logging.info('    program state to: %s', program_state_dir)
+  logging.info('    CSV metrics to: %s', csv_file_path)
+  logging.info('    TensorBoard summaries to: %s', summary_dir)
+  return program_state_manager, [
+      logging_release_manager,
+      csv_file_release_manager,
+      tensorboard_release_manager,
   ]
 
-  Args:
-    model_builder: A no-arg function returning an uncompiled `tf.keras.Model`.
-    metrics_builder: A no-arg function that returns a list of
-      `tf.keras.metrics.Metric` objects. These metrics must have a callable
-      `update_state` accepting `y_true` and `y_pred` arguments, corresponding
-      to the true and predicted label, respectively.
-    quantiles: Which quantiles to compute of mean-based metrics. Must be an
-      iterable of float values between 0 and 1.
 
-  Returns:
-    A function that takes as input a `tff.learning.ModelWeights` and a list of
-    client datasets, and returns an ordered dictionary with nested structure
-    `(metric_name, (aggregation_method, metric_value))`, corresponding to
-    various ways of aggregating the user-supplied metrics.
-  """
-  keras_model = model_builder()
-  metrics = metrics_builder()
+def write_hparams_to_csv(hparam_dict: Dict[str, Any], root_output_dir: str,
+                         experiment_name: str) -> None:
+  """Writes a dictionary of hyperparameters to a CSV file.
 
-  client_eval_fn = _build_client_evaluate_fn(keras_model, metrics)
-
-  def evaluate_fn(model_weights: tff.learning.ModelWeights,
-                  client_datasets: List[tf.data.Dataset]) -> Dict[str, Any]:
-
-    model_weights_as_list = tff.learning.ModelWeights(
-        trainable=list(model_weights.trainable),
-        non_trainable=list(model_weights.non_trainable))
-    model_weights_as_list.assign_weights_to(keras_model)
-
-    metrics_at_clients = collections.defaultdict(list)
-
-    # Record all client metrics
-    for client_ds in client_datasets:
-      tuple_ds = convert_to_tuple_dataset(client_ds)
-      client_metrics = client_eval_fn(tuple_ds)
-      for (metric_name, metric_value) in client_metrics.items():
-        metrics_at_clients[metric_name].append(metric_value)
-
-    # Aggregate metrics across clients
-    aggregate_metrics = collections.OrderedDict()
-
-    num_examples_at_clients = tf.cast(
-        metrics_at_clients['num_examples'], dtype=tf.float32)
-    total_num_examples = tf.reduce_sum(num_examples_at_clients)
-
-    for (metric_name, metric_at_clients) in metrics_at_clients.items():
-      metric_as_float = tf.cast(metric_at_clients, dtype=tf.float32)
-
-      uniform_weighted_value = tf.reduce_mean(metric_as_float).numpy()
-      example_weighted_value = (tf.reduce_sum(
-          tf.math.multiply(metric_as_float, num_examples_at_clients)) /
-                                total_num_examples).numpy()
-
-      quantile_values = np.quantile(metric_as_float, quantiles)
-      quantile_values = collections.OrderedDict(zip(quantiles, quantile_values))
-
-      aggregate_metrics[metric_name] = collections.OrderedDict(
-          example_weighted=example_weighted_value,
-          uniform_weighted=uniform_weighted_value,
-          quantiles=quantile_values)
-
-    return aggregate_metrics
-
-  return evaluate_fn
-
-
-def build_sample_fn(
-    a: Union[Sequence[Any], int],
-    size: int,
-    replace: bool = False,
-    random_seed: Optional[int] = None) -> Callable[[int], np.ndarray]:
-  """Builds the function for sampling from the input iterator at each round.
+  All hyperparameters are written atomically to
+  `{root_output_dir}/results/{experiment_name}/hparams.csv`.
 
   Args:
-    a: A 1-D array-like sequence or int that satisfies np.random.choice.
-    size: The number of samples to return each round.
-    replace: A boolean indicating whether the sampling is done with replacement
-      (True) or without replacement (False).
-    random_seed: If random_seed is set as an integer, then we use it as a random
-      seed for which clients are sampled at each round. In this case, we set a
-      random seed before sampling clients according to a multiplicative linear
-      congruential generator (aka Lehmer generator, see 'The Art of Computer
-      Programming, Vol. 3' by Donald Knuth for reference). This does not affect
-      model initialization, shuffling, or other such aspects of the federated
-      training process.
-
-  Returns:
-    A function which returns a list of elements from the input iterator at a
-    given round round_num.
+    hparam_dict: A dictionary mapping string values to keys.
+    root_output_dir: root_output_dir: A string representing the root output
+      directory for the training simulation.
+    experiment_name: A unique identifier for the current training simulation.
   """
+  results_dir = os.path.join(root_output_dir, 'results', experiment_name)
+  tf.io.gfile.makedirs(results_dir)
+  hparam_file = os.path.join(results_dir, 'hparams.csv')
+  utils_impl.atomic_write_series_to_csv(hparam_dict, hparam_file)
 
-  if isinstance(random_seed, int):
-    mlcg_start = np.random.RandomState(random_seed).randint(1, MLCG_MODULUS - 1)
 
-    def get_pseudo_random_int(round_num):
-      return pow(MLCG_MULTIPLIER, round_num,
-                 MLCG_MODULUS) * mlcg_start % MLCG_MODULUS
+def create_validation_fn(
+    task: tff.simulation.baselines.BaselineTask,
+    validation_frequency: int,
+    num_validation_examples: Optional[int] = None
+) -> Callable[[tff.learning.ModelWeights, int], Any]:
+  """Creates a function for validating performance of a `tff.learning.Model`."""
+  if task.datasets.validation_data is not None:
+    validation_set = task.datasets.validation_data
+  else:
+    validation_set = task.datasets.test_data
+  validation_set = validation_set.create_tf_dataset_from_all_clients()
+  if num_validation_examples is not None:
+    validation_set = validation_set.take(num_validation_examples)
+  validation_set = task.datasets.eval_preprocess_fn(validation_set)
 
-  def sample(round_num, random_seed):
-    if isinstance(random_seed, int):
-      random_state = np.random.RandomState(get_pseudo_random_int(round_num))
+  evaluate_fn = tff.learning.build_federated_evaluation(task.model_fn)
+
+  def validation_fn(model_weights, round_num):
+    if round_num % validation_frequency == 0:
+      return evaluate_fn(model_weights, [validation_set])
     else:
-      random_state = np.random.RandomState()
-    return random_state.choice(a, size=size, replace=replace)
+      return {}
 
-  return functools.partial(sample, random_seed=random_seed)
+  return validation_fn
 
 
-def build_client_datasets_fn(
-    dataset: tff.simulation.ClientData,
+def create_test_fn(
+    task: tff.simulation.baselines.BaselineTask
+) -> Callable[[tff.learning.ModelWeights], Any]:
+  """Creates a function for testing performance of a `tff.learning.Model`."""
+  test_set = task.datasets.get_centralized_test_data()
+  evaluate_fn = tff.learning.build_federated_evaluation(task.model_fn)
+
+  def test_fn(model_weights):
+    return evaluate_fn(model_weights, [test_set])
+
+  return test_fn
+
+
+def create_client_selection_fn(
+    task: tff.simulation.baselines.BaselineTask,
     clients_per_round: int,
     random_seed: Optional[int] = None
 ) -> Callable[[int], List[tf.data.Dataset]]:
-  """Builds the function for generating client datasets at each round.
+  """Creates a random sampling function over training client datasets."""
+  train_data = task.datasets.train_data.preprocess(
+      task.datasets.train_preprocess_fn)
+  client_id_sampling_fn = tff.simulation.build_uniform_sampling_fn(
+      task.datasets.train_data.client_ids, random_seed=random_seed)
 
-  The function samples a number of clients (without replacement within a given
-  round, but with replacement across rounds) and returns their datasets.
+  def client_selection_fn(round_num):
+    client_ids = client_id_sampling_fn(round_num, clients_per_round)
+    return [train_data.create_tf_dataset_for_client(x) for x in client_ids]
 
-  Args:
-    dataset: A `tff.simulation.ClientData` object.
-    clients_per_round: The number of client participants in each round.
-    random_seed: If random_seed is set as an integer, then we use it as a random
-      seed for which clients are sampled at each round. In this case, we set a
-      random seed before sampling clients according to a multiplicative linear
-      congruential generator (aka Lehmer generator, see 'The Art of Computer
-      Programming, Vol. 3' by Donald Knuth for reference). This does not affect
-      model initialization, shuffling, or other such aspects of the federated
-      training process. Note that this will alter the global numpy random seed.
-
-  Returns:
-    A function which returns a list of `tf.data.Dataset` objects at a
-    given round round_num.
-  """
-  sample_clients_fn = build_sample_fn(
-      dataset.client_ids,
-      size=clients_per_round,
-      replace=False,
-      random_seed=random_seed)
-
-  def client_datasets(round_num):
-    sampled_clients = sample_clients_fn(round_num)
-    return [
-        dataset.create_tf_dataset_for_client(client)
-        for client in sampled_clients
-    ]
-
-  return client_datasets
+  return client_selection_fn

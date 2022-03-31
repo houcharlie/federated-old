@@ -19,7 +19,7 @@ encountered throughout training. For more details on the learning rate decay,
 see `callbacks.py` and `adaptive_fed_avg.py`.
 """
 
-from typing import Callable
+import functools
 
 from absl import app
 from absl import flags
@@ -27,21 +27,10 @@ import tensorflow_federated as tff
 
 from adaptive_lr_decay import adaptive_fed_avg
 from adaptive_lr_decay import callbacks
-from optimization.cifar100 import federated_cifar100
-from optimization.emnist import federated_emnist
-from optimization.emnist_ae import federated_emnist_ae
-from optimization.shakespeare import federated_shakespeare
-from optimization.shared import optimizer_utils
-from optimization.shared import training_specs
-from optimization.stackoverflow import federated_stackoverflow
-from optimization.stackoverflow_lr import federated_stackoverflow_lr
-from utils import training_loop
+from utils import task_utils
+from utils import training_utils
 from utils import utils_impl
-
-_SUPPORTED_TASKS = [
-    'cifar100', 'emnist_cr', 'emnist_ae', 'shakespeare', 'stackoverflow_nwp',
-    'stackoverflow_lr'
-]
+from utils.optimizers import optimizer_utils
 
 with utils_impl.record_hparam_flags() as optimizer_flags:
   optimizer_utils.define_optimizer_flags('client')
@@ -67,11 +56,15 @@ with utils_impl.record_hparam_flags() as callback_flags:
 
 with utils_impl.record_hparam_flags() as shared_flags:
   # Federated training hyperparameters
-  flags.DEFINE_integer('client_epochs_per_round', -1,
+  flags.DEFINE_integer('client_epochs_per_round', 1,
                        'Number of epochs in the client to take per round.')
   flags.DEFINE_integer('client_batch_size', 20, 'Batch size on the clients.')
   flags.DEFINE_integer('clients_per_round', 10,
                        'How many clients to sample per round.')
+  flags.DEFINE_integer(
+      'max_elements_per_client', None, 'Maximum number of '
+      'elements for each training client. If set to None, all '
+      'available examples are used.')
   flags.DEFINE_integer('client_datasets_random_seed', 1,
                        'Random seed for client sampling.')
   flags.DEFINE_integer('total_rounds', 200, 'Number of total training rounds.')
@@ -88,51 +81,12 @@ with utils_impl.record_hparam_flags() as shared_flags:
   flags.DEFINE_integer('rounds_per_checkpoint', 50,
                        'How often to checkpoint the global model.')
   flags.DEFINE_integer(
-      'rounds_per_profile', 0,
-      '(Experimental) How often to run the experimental TF profiler, if >0.')
+      'num_validation_examples', -1, 'The number of validation'
+      'examples to use. If set to -1, all available examples '
+      'are used.')
 
 with utils_impl.record_hparam_flags() as task_flags:
-  # Task specification
-  flags.DEFINE_enum('task', None, _SUPPORTED_TASKS,
-                    'Which task to perform federated training on.')
-
-  # CIFAR-100 flags
-  flags.DEFINE_integer('cifar100_crop_size', 24, 'The height and width of '
-                       'images after preprocessing.')
-
-  # EMNIST CR flags
-  flags.DEFINE_enum(
-      'emnist_cr_model', 'cnn', ['cnn', '2nn'], 'Which model to '
-      'use. This can be a convolutional model (cnn) or a two '
-      'hidden-layer densely connected network (2nn).')
-
-  # Shakespeare flags
-  flags.DEFINE_integer(
-      'shakespeare_sequence_length', 80,
-      'Length of character sequences to use for the RNN model.')
-
-  # Stack Overflow NWP flags
-  flags.DEFINE_integer('so_nwp_vocab_size', 10000, 'Size of vocab to use.')
-  flags.DEFINE_integer('so_nwp_num_oov_buckets', 1,
-                       'Number of out of vocabulary buckets.')
-  flags.DEFINE_integer('so_nwp_sequence_length', 20,
-                       'Max sequence length to use.')
-  flags.DEFINE_integer('so_nwp_max_elements_per_user', 1000, 'Max number of '
-                       'training sentences to use per user.')
-  flags.DEFINE_integer(
-      'so_nwp_num_validation_examples', 10000, 'Number of examples '
-      'to use from test set for per-round validation.')
-
-  # Stack Overflow LR flags
-  flags.DEFINE_integer('so_lr_vocab_tokens_size', 10000,
-                       'Vocab tokens size used.')
-  flags.DEFINE_integer('so_lr_vocab_tags_size', 500, 'Vocab tags size used.')
-  flags.DEFINE_integer(
-      'so_lr_num_validation_examples', 10000, 'Number of examples '
-      'to use from test set for per-round validation.')
-  flags.DEFINE_integer('so_lr_max_elements_per_user', 1000,
-                       'Max number of training '
-                       'sentences to use per user.')
+  task_utils.define_task_flags()
 
 FLAGS = flags.FLAGS
 
@@ -144,7 +98,6 @@ def main(argv):
 
   client_optimizer_fn = optimizer_utils.create_optimizer_fn_from_flags('client')
   server_optimizer_fn = optimizer_utils.create_optimizer_fn_from_flags('server')
-
   client_lr_callback = callbacks.create_reduce_lr_on_plateau(
       learning_rate=FLAGS.client_learning_rate,
       decay_factor=FLAGS.client_decay_factor,
@@ -152,7 +105,6 @@ def main(argv):
       min_lr=FLAGS.min_lr,
       window_size=FLAGS.window_size,
       patience=FLAGS.patience)
-
   server_lr_callback = callbacks.create_reduce_lr_on_plateau(
       learning_rate=FLAGS.server_learning_rate,
       decay_factor=FLAGS.server_decay_factor,
@@ -161,74 +113,53 @@ def main(argv):
       window_size=FLAGS.window_size,
       patience=FLAGS.patience)
 
-  def iterative_process_builder(
-      model_fn: Callable[[], tff.learning.Model],
-  ) -> tff.templates.IterativeProcess:
-    """Creates an iterative process using a given TFF `model_fn`.
+  train_client_spec = tff.simulation.baselines.ClientSpec(
+      num_epochs=FLAGS.client_epochs_per_round,
+      batch_size=FLAGS.client_batch_size,
+      max_elements=FLAGS.max_elements_per_client)
+  task = task_utils.create_task_from_flags(train_client_spec)
 
-    Args:
-      model_fn: A no-arg function returning a `tff.learning.Model`.
+  iterative_process = adaptive_fed_avg.build_fed_avg_process(
+      task.model_fn,
+      client_lr_callback,
+      server_lr_callback,
+      client_optimizer_fn=client_optimizer_fn,
+      server_optimizer_fn=server_optimizer_fn)
+  train_data = task.datasets.train_data.preprocess(
+      task.datasets.train_preprocess_fn)
+  training_process = (
+      tff.simulation.compose_dataset_computation_with_iterative_process(
+          train_data.dataset_computation, iterative_process))
 
-    Returns:
-      A `tff.templates.IterativeProcess`.
-    """
+  training_selection_fn = functools.partial(
+      tff.simulation.build_uniform_sampling_fn(
+          train_data.client_ids, random_seed=FLAGS.client_datasets_random_seed),
+      size=FLAGS.clients_per_round)
 
-    return adaptive_fed_avg.build_fed_avg_process(
-        model_fn,
-        client_lr_callback,
-        server_lr_callback,
-        client_optimizer_fn=client_optimizer_fn,
-        server_optimizer_fn=server_optimizer_fn)
+  test_data = task.datasets.get_centralized_test_data()
+  validation_data = test_data.take(FLAGS.num_validation_examples)
+  federated_eval = tff.learning.build_federated_evaluation(task.model_fn)
+  evaluation_selection_fn = lambda round_num: [validation_data]
 
-  task_spec = training_specs.TaskSpec(
-      iterative_process_builder=iterative_process_builder,
-      client_epochs_per_round=FLAGS.client_epochs_per_round,
-      client_batch_size=FLAGS.client_batch_size,
-      clients_per_round=FLAGS.clients_per_round,
-      client_datasets_random_seed=FLAGS.client_datasets_random_seed)
+  def evaluation_fn(state, evaluation_data):
+    return federated_eval(state.model, evaluation_data)
 
-  if FLAGS.task == 'cifar100':
-    runner_spec = federated_cifar100.configure_training(
-        task_spec, crop_size=FLAGS.cifar100_crop_size)
-  elif FLAGS.task == 'emnist_cr':
-    runner_spec = federated_emnist.configure_training(
-        task_spec, model=FLAGS.emnist_cr_model)
-  elif FLAGS.task == 'emnist_ae':
-    runner_spec = federated_emnist_ae.configure_training(task_spec)
-  elif FLAGS.task == 'shakespeare':
-    runner_spec = federated_shakespeare.configure_training(
-        task_spec, sequence_length=FLAGS.shakespeare_sequence_length)
-  elif FLAGS.task == 'stackoverflow_nwp':
-    runner_spec = federated_stackoverflow.configure_training(
-        task_spec,
-        vocab_size=FLAGS.so_nwp_vocab_size,
-        num_oov_buckets=FLAGS.so_nwp_num_oov_buckets,
-        sequence_length=FLAGS.so_nwp_sequence_length,
-        max_elements_per_user=FLAGS.so_nwp_max_elements_per_user,
-        num_validation_examples=FLAGS.so_nwp_num_validation_examples)
-  elif FLAGS.task == 'stackoverflow_lr':
-    runner_spec = federated_stackoverflow_lr.configure_training(
-        task_spec,
-        vocab_tokens_size=FLAGS.so_lr_vocab_tokens_size,
-        vocab_tags_size=FLAGS.so_lr_vocab_tags_size,
-        max_elements_per_user=FLAGS.so_lr_max_elements_per_user,
-        num_validation_examples=FLAGS.so_lr_num_validation_examples)
-  else:
-    raise ValueError(
-        '--task flag {} is not supported, must be one of {}.'.format(
-            FLAGS.task, _SUPPORTED_TASKS))
-
-  training_loop.run(
-      iterative_process=runner_spec.iterative_process,
-      client_datasets_fn=runner_spec.client_datasets_fn,
-      validation_fn=runner_spec.validation_fn,
-      test_fn=runner_spec.test_fn,
+  program_state_manager, metrics_managers = training_utils.create_managers(
+      FLAGS.root_output_dir, FLAGS.experiment_name)
+  state = tff.simulation.run_training_process(
+      training_process=training_process,
+      training_selection_fn=training_selection_fn,
       total_rounds=FLAGS.total_rounds,
-      experiment_name=FLAGS.experiment_name,
-      root_output_dir=FLAGS.root_output_dir,
-      rounds_per_eval=FLAGS.rounds_per_eval,
-      rounds_per_checkpoint=FLAGS.rounds_per_checkpoint,
-      rounds_per_profile=FLAGS.rounds_per_profile)
+      evaluation_fn=evaluation_fn,
+      evaluation_selection_fn=evaluation_selection_fn,
+      rounds_per_evaluation=FLAGS.rounds_per_eval,
+      program_state_manager=program_state_manager,
+      rounds_per_saving_program_state=FLAGS.rounds_per_checkpoint,
+      metrics_managers=metrics_managers)
+
+  test_metrics = federated_eval(state.model, [test_data])
+  for metrics_manager in metrics_managers:
+    metrics_manager.release(test_metrics, FLAGS.total_rounds + 1)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
-package(default_visibility = ["//visibility:public"])
+package(default_visibility = ["//triehh:__subpackages__"])
 
 licenses(["notice"])
 
@@ -24,7 +24,6 @@ py_test(
     srcs_version = "PY3",
     tags = [
         "manual",
-        "nokokoro",
     ],
     deps = [":heavy_hitters_utils"],
 )
